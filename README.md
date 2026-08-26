@@ -808,3 +808,14 @@ atlas/
 ## Author
 
 Naing Lynn
+
+---
+
+<p align="center">
+  <sub>Backed by</sub>
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/cal-fund-wordmark-white.svg">
+    <img alt="cal.fund" src=".github/assets/cal-fund-wordmark-black.svg" width="220">
+  </picture>
+</p>
