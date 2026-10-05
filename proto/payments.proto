@@ -16,6 +16,20 @@ service PaymentsService {
   rpc GetWalletBalance(WalletRequest) returns (WalletResponse);
   rpc RefundTransaction(RefundRequest) returns (RefundResponse);
 
+  // Connect onboarding: create (or resume) a Stripe Express account for
+  // the caller and hand back the hosted onboarding URL the app must send
+  // them to. Safe to expose through the gateway for the same reason
+  // Deposit is: the account created is the token subject's, so a caller
+  // can only ever onboard themselves as a payee.
+  rpc CreateConnectAccount(CreateConnectAccountRequest) returns (CreateConnectAccountResponse);
+
+  // The caller's own payout account: whether it exists and whether
+  // Stripe has finished onboarding it (payouts_enabled). A transaction
+  // whose payee has no usable account fails at authorize time, so the app
+  // needs this to know when to stop showing the "add payout account"
+  // screen.
+  rpc GetConnectAccount(GetConnectAccountRequest) returns (GetConnectAccountResponse);
+
   // Internal: forces an immediate outbox drain pass and returns the number of
   // rows dispatched. The dispatcher also runs on a timer; this is for tests
   // and ops that want a deterministic flush. Not exposed through the gateway.
@@ -52,6 +66,12 @@ message TransactionRequest {
   string idempotency_key = 4;
   string ride_id        = 5;
   string project_id     = 6;
+  // The tenant's cut of the fare, in cents, taken out of amount_cents (the
+  // Connect application_fee). 0 means no fee. Injected by the gateway from
+  // project configuration is the future plan; for now the caller's project
+  // settings own it — either way it is bounded by amount_cents in the
+  // service.
+  int64  application_fee_cents = 7;
 }
 
 message TransactionResponse {
@@ -70,3 +90,24 @@ message RefundResponse { bool success = 1; }
 
 message DrainOutboxRequest  { uint32 max_rows = 1; }   // 0 => default 100
 message DrainOutboxResponse { uint32 rows_dispatched = 1; }
+
+message CreateConnectAccountRequest {
+  string user_id = 1;
+  string project_id = 2;
+  // Where Stripe should return the user after onboarding completes.
+  string return_url = 3;
+}
+message CreateConnectAccountResponse {
+  // The hosted onboarding URL. Single-use and short-lived; the app must
+  // send the user to it immediately.
+  string onboarding_url = 1;
+}
+
+message GetConnectAccountRequest {
+  string user_id = 1;
+  string project_id = 2;
+}
+message GetConnectAccountResponse {
+  bool   exists = 1;
+  bool   payouts_enabled = 2;
+}

@@ -1,5 +1,6 @@
 package io.atlas.payments
 
+import io.atlas.payments.core.ChargeRequest
 import io.atlas.payments.core.PaymentProvider
 import io.atlas.payments.core.ProviderResult
 import io.atlas.payments.core.ProviderStatus
@@ -8,6 +9,7 @@ import io.atlas.payments.http.startHttpServer
 import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.URI
+import java.util.UUID
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -34,14 +36,14 @@ class WebhookEndpointTest {
         var asked = 0
             private set
 
-        override fun authorize(amountCents: Long, idempotencyKey: String) =
+        override fun authorize(request: ChargeRequest, idempotencyKey: String) =
             ProviderResult(true, "ref")
 
-        override fun capture(providerRef: String) = ProviderResult(true, providerRef)
-        override fun refund(providerRef: String) = ProviderResult(true, providerRef)
-        override fun lookup(providerRef: String) = ProviderStatus.UNKNOWN
+        override fun capture(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun refund(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun lookup(projectId: UUID, providerRef: String) = ProviderStatus.UNKNOWN
 
-        override fun verifyWebhook(payload: String, signature: String?): Boolean {
+        override fun verifyWebhook(projectId: UUID, payload: String, signature: String?): Boolean {
             asked++
             return false
         }
@@ -52,14 +54,14 @@ class WebhookEndpointTest {
         var lastPayload: String? = null
             private set
 
-        override fun authorize(amountCents: Long, idempotencyKey: String) =
+        override fun authorize(request: ChargeRequest, idempotencyKey: String) =
             ProviderResult(true, "ref")
 
-        override fun capture(providerRef: String) = ProviderResult(true, providerRef)
-        override fun refund(providerRef: String) = ProviderResult(true, providerRef)
-        override fun lookup(providerRef: String) = ProviderStatus.UNKNOWN
+        override fun capture(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun refund(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun lookup(projectId: UUID, providerRef: String) = ProviderStatus.UNKNOWN
 
-        override fun verifyWebhook(payload: String, signature: String?): Boolean {
+        override fun verifyWebhook(projectId: UUID, payload: String, signature: String?): Boolean {
             lastPayload = payload
             return true
         }

@@ -35,6 +35,17 @@ interface TransactionRepository {
      */
     fun findByIdempotencyKey(projectId: UUID, key: String): TxRecord?
     fun findById(projectId: UUID, id: UUID): TxRecord?
+
+    /**
+     * Find a transaction by its provider reference — the webhook path.
+     *
+     * A Stripe event names a PaymentIntent id, and the pending row holds
+     * it in provider_ref. Scoped by project for the same reason every
+     * other read here is: the webhook endpoint is per-tenant
+     * (/webhooks/stripe/{project_id}), so the lookup must not be able to
+     * match another tenant's charge.
+     */
+    fun findByProviderRef(projectId: UUID, providerRef: String): TxRecord?
     /** Inserts a pending transaction. Throws [DuplicateIdempotencyKey] on conflict. */
     fun insertPending(
         projectId: UUID,

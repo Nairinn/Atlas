@@ -1,9 +1,13 @@
 package io.atlas.payments.grpc
 
+import atlas.payments.CreateConnectAccountRequest
+import atlas.payments.CreateConnectAccountResponse
 import atlas.payments.DepositRequest
 import atlas.payments.DepositResponse
 import atlas.payments.DrainOutboxRequest
 import atlas.payments.DrainOutboxResponse
+import atlas.payments.GetConnectAccountRequest
+import atlas.payments.GetConnectAccountResponse
 import atlas.payments.PaymentsServiceGrpcKt
 import atlas.payments.RefundRequest
 import atlas.payments.RefundResponse
@@ -58,6 +62,7 @@ class PaymentsGrpcService(
                 amountCents = request.amountCents,
                 idempotencyKey = request.idempotencyKey,
                 rideId = request.rideId,
+                applicationFeeCents = request.applicationFeeCents,
             )
         } catch (e: PaymentError) {
             throw e.toGrpcStatusException()
@@ -110,6 +115,33 @@ class PaymentsGrpcService(
             .build()
     }
 
+    override suspend fun createConnectAccount(request: CreateConnectAccountRequest): CreateConnectAccountResponse {
+        val url = try {
+            payments.startConnectOnboarding(
+                request.projectId.toProjectId(),
+                request.userId,
+                request.returnUrl,
+            )
+        } catch (e: PaymentError) {
+            throw e.toGrpcStatusException()
+        }
+        return CreateConnectAccountResponse.newBuilder()
+            .setOnboardingUrl(url)
+            .build()
+    }
+
+    override suspend fun getConnectAccount(request: GetConnectAccountRequest): GetConnectAccountResponse {
+        val status = try {
+            payments.connectAccountStatus(request.projectId.toProjectId(), request.userId)
+        } catch (e: PaymentError) {
+            throw e.toGrpcStatusException()
+        }
+        return GetConnectAccountResponse.newBuilder()
+            .setExists(status.exists)
+            .setPayoutsEnabled(status.payoutsEnabled)
+            .build()
+    }
+
     companion object {
         private val LOG = LoggerFactory.getLogger(PaymentsGrpcService::class.java)
     }
@@ -120,6 +152,9 @@ private fun PaymentError.toGrpcStatusException(): StatusException = when (this) 
     // INVALID_ARGUMENT: the id is well-formed, it just does not describe
     // anyone they can pay.
     is PaymentError.UnknownUser ->
+        Status.FAILED_PRECONDITION.withDescription(message).asException()
+
+    is PaymentError.DriverNotOnboarded ->
         Status.FAILED_PRECONDITION.withDescription(message).asException()
 
     is PaymentError.InvalidAmount -> Status.INVALID_ARGUMENT.withDescription(message).asException()

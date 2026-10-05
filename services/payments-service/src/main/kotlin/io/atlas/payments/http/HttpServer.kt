@@ -3,6 +3,7 @@ package io.atlas.payments.http
 import io.atlas.payments.core.PaymentProvider
 import io.atlas.payments.core.OutboxBackend
 import io.atlas.payments.core.PaymentsMetrics
+import io.atlas.payments.core.StripeWebhookHandler
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -20,6 +21,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.prometheusmetrics.PrometheusConfig
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry
 import org.slf4j.LoggerFactory
+import java.util.UUID
 
 private val LOG = LoggerFactory.getLogger("io.atlas.payments.http.HttpServer")
 
@@ -28,14 +30,23 @@ private val LOG = LoggerFactory.getLogger("io.atlas.payments.http.HttpServer")
  * provider webhooks. Consolidating them onto one port keeps the service to one
  * HTTP listener (gRPC is separate, on its own port).
  *
- *   GET  /metrics            Prometheus exposition (Micrometer)
- *   GET  /healthz            liveness ping
- *   POST /webhooks/{provider} async provider callbacks (acknowledged, logged)
+ *   GET  /metrics                          Prometheus exposition (Micrometer)
+ *   GET  /healthz                          liveness ping
+ *   POST /webhooks/stripe/{project_id}     Stripe events for one project
+ *   POST /webhooks/{provider}              legacy single-tenant path; kept
+ *                                          only for the fake provider, which
+ *                                          has no project scoping
+ *
+ * The Stripe endpoint is per-project because each tenant registers its own
+ * webhook endpoint in its own Stripe dashboard, so the signing secret —
+ * and the credentials the events refer to — are per tenant. The project id
+ * in the path selects the config row the signature is verified against.
  */
 fun startHttpServer(
     port: Int,
     registry: PrometheusMeterRegistry,
     provider: PaymentProvider,
+    webhookHandler: ((projectId: UUID, eventType: String, payload: String) -> StripeWebhookHandler.Result)? = null,
 ): NettyApplicationEngine =
     embeddedServer(Netty, port = port) {
         routing {
@@ -44,6 +55,58 @@ fun startHttpServer(
             }
             get("/healthz") {
                 call.respondText("ok")
+            }
+            post("/webhooks/stripe/{project_id}") {
+                val projectId = call.parameters["project_id"]
+                    ?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+                if (projectId == null) {
+                    call.respond(HttpStatusCode.BadRequest)
+                    return@post
+                }
+
+                // Bounded before reading, same reasoning as below: this
+                // endpoint is unauthenticated by nature.
+                val declared = call.request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+                if (declared != null && declared > MAX_WEBHOOK_BYTES) {
+                    call.respond(HttpStatusCode.PayloadTooLarge)
+                    return@post
+                }
+                val body = call.receiveText()
+                if (body.length > MAX_WEBHOOK_BYTES) {
+                    call.respond(HttpStatusCode.PayloadTooLarge)
+                    return@post
+                }
+
+                // Verify BEFORE doing anything with the payload, against
+                // THIS project's webhook secret.
+                val signature = call.request.headers["Stripe-Signature"]
+                if (!provider.verifyWebhook(projectId, body, signature)) {
+                    LOG.warn("rejected stripe webhook for project={}: bad signature", projectId)
+                    call.respond(HttpStatusCode.Unauthorized)
+                    return@post
+                }
+
+                if (webhookHandler == null) {
+                    // Verified but nobody is acting on it yet — an honest
+                    // 202 rather than a lie of a 200.
+                    call.respond(HttpStatusCode.Accepted)
+                    return@post
+                }
+
+                val eventType = call.request.headers["Stripe-Event-Type"]
+                    ?: webhookEventTypeFromBody(body)
+                when (val result = webhookHandler(projectId, eventType, body)) {
+                    is StripeWebhookHandler.Result.Applied ->
+                        LOG.info("stripe webhook project={} applied: {}", projectId, result.what)
+                    is StripeWebhookHandler.Result.Ignored ->
+                        LOG.debug("stripe webhook project={} ignored: {}", projectId, result.why)
+                    is StripeWebhookHandler.Result.Malformed ->
+                        LOG.warn("stripe webhook project={} malformed: {}", projectId, result.why)
+                }
+                // All three outcomes are "delivered" from Stripe's point of
+                // view. A 500 would mean retry-forever on an event that
+                // will never parse better the second time.
+                call.respond(HttpStatusCode.OK)
             }
             post("/webhooks/{provider}") {
                 val source = call.parameters["provider"] ?: "unknown"
@@ -82,7 +145,7 @@ fun startHttpServer(
                 // PaymentProvider interface rather than here.
                 val signature = call.request.headers["Stripe-Signature"]
                     ?: call.request.headers["X-Webhook-Signature"]
-                if (!provider.verifyWebhook(body, signature)) {
+                if (!provider.verifyWebhook(projectIdFromPath(), body, signature)) {
                     LOG.warn("rejected webhook from provider={}: bad signature", source)
                     call.respond(HttpStatusCode.Unauthorized)
                     return@post
@@ -101,6 +164,25 @@ fun startHttpServer(
  * Largest webhook body accepted. Provider events run to a few kilobytes.
  */
 private const val MAX_WEBHOOK_BYTES = 1_000_000
+
+/**
+ * The event type from the body when the header is absent. Stripe does not
+ * reliably send a type header, so the fallback reads `type` off the JSON
+ * envelope — the one field every event has.
+ */
+private fun webhookEventTypeFromBody(body: String): String =
+    Regex(""""type"\s*:\s*"([^"]+)"""").find(body)?.groupValues?.getOrNull(1) ?: "unknown"
+
+/**
+ * The legacy single-tenant webhook path has no project in the URL, so it
+ * verifies against... nothing, which is exactly what it should do: the
+ * fake provider accepts everything, and any future provider that uses
+ * this path must decide for itself what "no project" means rather than
+ * inheriting a silent default. A UUID that matches no config row is the
+ * value guaranteed to fail every real verification.
+ */
+private fun projectIdFromPath(): UUID =
+    UUID.fromString("00000000-0000-0000-0000-000000000000")
 
 /** Creates the Prometheus registry App.kt shares with the HTTP server and metrics. */
 fun newPrometheusRegistry(): PrometheusMeterRegistry =

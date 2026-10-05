@@ -20,6 +20,13 @@ data class EnvConfig(
     val outboxBatchSize: Int,
     /** Which PaymentProvider to run. "fake" until a real processor is wired. */
     val paymentProvider: String,
+    /**
+     * AES key for control.project_payment_config credential columns.
+     * Null when no project uses Stripe — see App.kt.
+     */
+    val paymentConfigEncKey: String?,
+    /** Where Stripe API calls go when overridden (stripe-mock, tests). */
+    val stripeApiBase: String?,
 ) {
     companion object {
         fun fromEnv(env: Map<String, String> = System.getenv()): EnvConfig {
@@ -37,6 +44,8 @@ data class EnvConfig(
                 outboxPollSeconds = env["OUTBOX_POLL_SECONDS"]?.toLong() ?: 2,
                 outboxBatchSize = env["OUTBOX_BATCH_SIZE"]?.toInt() ?: 100,
                 paymentProvider = env["PAYMENT_PROVIDER"] ?: "fake",
+                paymentConfigEncKey = env["PAYMENT_CONFIG_ENC_KEY"],
+                stripeApiBase = env["STRIPE_API_BASE"],
             )
         }
 

@@ -1,5 +1,6 @@
 package io.atlas.payments
 
+import io.atlas.payments.core.ChargeRequest
 import io.atlas.payments.core.PaymentProvider
 import io.atlas.payments.core.ProviderResult
 import io.atlas.payments.core.ProviderStatus
@@ -42,14 +43,14 @@ class ReconciliationTest {
         var lookups = 0
             private set
 
-        override fun authorize(amountCents: Long, idempotencyKey: String) =
+        override fun authorize(request: ChargeRequest, idempotencyKey: String) =
             ProviderResult(true, "ref_$idempotencyKey")
 
-        override fun capture(providerRef: String) = ProviderResult(true, providerRef)
-        override fun refund(providerRef: String) = ProviderResult(true, providerRef)
-        override fun verifyWebhook(payload: String, signature: String?) = true
+        override fun capture(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun refund(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun verifyWebhook(projectId: UUID, payload: String, signature: String?) = true
 
-        override fun lookup(providerRef: String): ProviderStatus {
+        override fun lookup(projectId: UUID, providerRef: String): ProviderStatus {
             lookups++
             if (providerRef in throwOn) throw RuntimeException("provider unreachable")
             return answers[providerRef] ?: ProviderStatus.UNKNOWN

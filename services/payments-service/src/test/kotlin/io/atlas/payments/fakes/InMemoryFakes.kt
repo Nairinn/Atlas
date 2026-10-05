@@ -101,6 +101,13 @@ class InMemoryTransactionRepository : TransactionRepository {
     override fun findById(projectId: UUID, id: UUID): TxRecord? = byId[projectId to id]
 
     @Synchronized
+    override fun findByProviderRef(projectId: UUID, providerRef: String): TxRecord? =
+        byId.entries
+            .filter { (key, _) -> key.first == projectId }
+            .map { (_, record) -> record }
+            .firstOrNull { it.providerRef == providerRef }
+
+    @Synchronized
     override fun insertPending(
         projectId: UUID,
         fromWallet: UUID?,

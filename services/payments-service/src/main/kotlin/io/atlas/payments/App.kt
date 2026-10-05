@@ -2,12 +2,19 @@ package io.atlas.payments
 
 import io.atlas.payments.config.EnvConfig
 import io.atlas.payments.core.PaymentProviders
+import io.atlas.payments.core.PaymentConfigSource
+import io.atlas.payments.core.PerProjectPaymentProvider
 import io.atlas.payments.core.ReconciliationSweep
 import io.atlas.payments.core.RetryingPaymentProvider
 import io.atlas.payments.core.PaymentsService
+import io.atlas.payments.core.StaticPaymentConfigSource
+import io.atlas.payments.core.StripeWebhookHandler
+import io.atlas.payments.crypto.ConfigCipher
 import io.atlas.payments.db.DatabaseBootstrap
 import io.atlas.payments.db.ExposedOutboxBackend
 import io.atlas.payments.db.ExposedOutboxStore
+import io.atlas.payments.db.ExposedPaymentConfigSource
+import io.atlas.payments.db.ExposedPayoutAccountSource
 import io.atlas.payments.db.ExposedTransactionRepository
 import io.atlas.payments.db.ExposedTransactionRunner
 import io.atlas.payments.db.ExposedWalletRepository
@@ -19,6 +26,8 @@ import io.atlas.payments.http.registerOutboxGauges
 import io.atlas.payments.http.startHttpServer
 import io.atlas.payments.kafka.FareEventProducer
 import io.atlas.payments.outbox.OutboxDispatcher
+import io.atlas.payments.stripe.StripeOnboarding
+import io.atlas.payments.stripe.StripePaymentProvider
 import io.grpc.ServerBuilder
 import org.slf4j.LoggerFactory
 import java.time.Clock
@@ -63,16 +72,62 @@ fun main() {
     val transactions = ExposedTransactionRepository()
     val outboxStore = ExposedOutboxStore()
     val runner = ExposedTransactionRunner()
-    // Selected by PAYMENT_PROVIDER. An unknown value throws here rather
-    // than silently falling back to the fake, which in production would
-    // approve every charge against money never collected.
-    // Wrapped so every provider call is bounded and the safely-retryable
-    // ones are retried. See RetryingPaymentProvider for why capture and
-    // refund deliberately are not.
+
+    // Per-project processor configuration. The encryption key is required
+    // only when a project has actually connected Stripe: a deployment
+    // where every project runs the fake provider must not be locked out
+    // by a missing env var it would never use.
+    val cipher = config.paymentConfigEncKey?.let { ConfigCipher(it) }
+    val configSource: PaymentConfigSource = cipher?.let { ExposedPaymentConfigSource(it) }
+        ?: StaticPaymentConfigSource(emptyMap())
+    val payoutSource = ExposedPayoutAccountSource()
+
+    // Connect onboarding: the Stripe adapter plus the persistence of the
+    // account row it creates. Only when the encryption key is present, for
+    // the same reason as the adapter below — onboarding without it would
+    // create accounts at Stripe that Atlas could never charge through.
+    val onboarding: StripeOnboarding? =
+        if (config.paymentConfigEncKey != null) {
+            StripeOnboarding(
+                configs = configSource,
+                // Persist after the network call succeeds — see the class
+                // note for why that order is the safe one.
+                store = payoutSource::saveOnboarding,
+                apiBase = config.stripeApiBase,
+            )
+        } else {
+            null
+        }
+
+    // The Stripe adapter, when any project could be configured for it.
+    // The client-per-project cache inside means one instance serves every
+    // tenant; STRIPE_API_BASE is a test/stripe-mock override. Built only
+    // when the encryption key is present, since a config row cannot even
+    // be decrypted without it.
+    val stripeProvider: StripePaymentProvider? =
+        if (config.paymentConfigEncKey != null) {
+            StripePaymentProvider(
+                configs = configSource,
+                payoutAccounts = payoutSource,
+                apiBase = config.stripeApiBase,
+            )
+        } else {
+            null
+        }
+
+    // Provider selection per project: a project with a 'stripe' config
+    // row talks to Stripe, everything else talks to the default named by
+    // PAYMENT_PROVIDER. Wrapped so every provider call is bounded and the
+    // safely-retryable ones are retried. See RetryingPaymentProvider for
+    // why capture and refund deliberately are not.
     val provider = RetryingPaymentProvider(
-        PaymentProviders.fromName(config.paymentProvider),
+        PerProjectPaymentProvider(
+            default = PaymentProviders.fromName(config.paymentProvider),
+            configs = configSource,
+            stripe = stripeProvider,
+        ),
     )
-    LOG.info("payment provider: {}", provider.name)
+    LOG.info("payment provider: {} (default); stripe per-project where configured", provider.name)
 
     val payments = PaymentsService(
         wallets = wallets,
@@ -81,6 +136,8 @@ fun main() {
         runner = runner,
         provider = provider,
         fareTopic = config.fareTopic,
+        payoutAccounts = payoutSource,
+        onboardingStarter = onboarding?.let { o -> o::start },
         clock = Clock.systemUTC(),
         metrics = metrics,
     )
@@ -107,7 +164,17 @@ fun main() {
         .addService(health.service)
         .build()
 
-    val httpServer = startHttpServer(config.httpPort, registry, provider)
+    val httpServer = startHttpServer(config.httpPort, registry, provider) { projectId, eventType, body ->
+        StripeWebhookHandler(
+            projectId = projectId,
+            transactions = transactions,
+            wallets = wallets,
+            runner = runner,
+            outbox = outboxStore,
+            fareTopic = config.fareTopic,
+            payoutAccounts = payoutSource,
+        ).handle(eventType, body)
+    }
     server.start()
     health.setServing()
     health.setServing("atlas.payments.PaymentsService")

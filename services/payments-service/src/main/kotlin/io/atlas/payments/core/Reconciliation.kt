@@ -88,7 +88,7 @@ class ReconciliationSweep(
             }
 
             val status = try {
-                provider.lookup(ref)
+                provider.lookup(tx.projectId, ref)
             } catch (e: Exception) {
                 // An exception is not evidence of anything about the
                 // charge, so it is treated exactly like UNKNOWN.

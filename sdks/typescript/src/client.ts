@@ -551,6 +551,45 @@ class PaymentsApi {
     });
     return { transactionId: res.transaction_id, status: res.status };
   }
+
+  /**
+   * Start payout onboarding for the CALLER's own account.
+   *
+   * Returns the hosted onboarding URL, which is single-use and
+   * short-lived: redirect the user immediately. The account being
+   * onboarded is the token subject's, so a caller can only ever set up
+   * payouts for themselves.
+   */
+  async startPayoutOnboarding(params: {
+    returnUrl: string;
+  }): Promise<{ onboardingUrl: string }> {
+    const res = await this.http.request<{ onboarding_url: string }>({
+      method: 'POST',
+      path: '/v1/payments/connected-accounts',
+      token: this.holder.getToken(),
+      body: { return_url: params.returnUrl },
+    });
+    return { onboardingUrl: res.onboarding_url };
+  }
+
+  /**
+   * The caller's own payout-account status. `payoutsEnabled` is what
+   * gates whether a transaction naming this user as payee can succeed.
+   */
+  async payoutAccount(): Promise<{
+    exists: boolean;
+    payoutsEnabled: boolean;
+  }> {
+    const res = await this.http.request<{
+      exists: boolean;
+      payouts_enabled: boolean;
+    }>({
+      method: 'GET',
+      path: '/v1/payments/connected-accounts',
+      token: this.holder.getToken(),
+    });
+    return { exists: res.exists, payoutsEnabled: res.payouts_enabled };
+  }
 }
 
 function randomKey(): string {

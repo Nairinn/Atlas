@@ -1,6 +1,7 @@
 package io.atlas.payments
 
 import atlas.events.FareEvent
+import io.atlas.payments.core.ChargeRequest
 import io.atlas.payments.core.FakePaymentProvider
 import io.atlas.payments.core.PaymentError
 import io.atlas.payments.core.PaymentProvider
@@ -134,7 +135,7 @@ class DepositTest {
     @Test
     fun `a declined authorization credits nothing and records nothing`() {
         val declining = object : PaymentProvider by FakePaymentProvider() {
-            override fun authorize(amountCents: Long, idempotencyKey: String) =
+            override fun authorize(request: ChargeRequest, idempotencyKey: String) =
                 ProviderResult(success = false, providerRef = "", message = "card declined")
         }
 
@@ -155,7 +156,7 @@ class DepositTest {
     @Test
     fun `a declined capture leaves the transaction failed and the wallet untouched`() {
         val failsCapture = object : PaymentProvider by FakePaymentProvider() {
-            override fun capture(providerRef: String) =
+            override fun capture(projectId: UUID, providerRef: String) =
                 ProviderResult(success = false, providerRef = providerRef, message = "capture refused")
         }
 
@@ -188,6 +189,6 @@ class DepositTest {
 
     @Test
     fun `the fake provider accepts webhooks, which is only safe because it sends none`() {
-        assertTrue(FakePaymentProvider().verifyWebhook("{}", null))
+        assertTrue(FakePaymentProvider().verifyWebhook(projectA, "{}", null))
     }
 }

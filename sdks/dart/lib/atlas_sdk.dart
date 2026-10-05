@@ -421,6 +421,32 @@ class PaymentsApi {
     return Transaction.fromJson(json as Map<String, dynamic>);
   }
 
+  /// Start payout onboarding for the CALLER's own account.
+  ///
+  /// The returned URL is single-use and short-lived: redirect the user
+  /// immediately. The account being onboarded is the token subject's,
+  /// so a caller can only ever set up payouts for themselves.
+  Future<OnboardingUrl> startPayoutOnboarding({
+    required String returnUrl,
+  }) async {
+    final json = await _http.send(
+      method: 'POST',
+      path: '/v1/payments/connected-accounts',
+      body: {'return_url': returnUrl},
+    );
+    return OnboardingUrl.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// The caller's own payout-account status. `payoutsEnabled` is what
+  /// gates whether a transaction naming this user as payee can succeed.
+  Future<PayoutAccountStatus> payoutAccount() async {
+    final json = await _http.send(
+      method: 'GET',
+      path: '/v1/payments/connected-accounts',
+    );
+    return PayoutAccountStatus.fromJson(json as Map<String, dynamic>);
+  }
+
   /// A random idempotency key.
   ///
   /// `Random.secure()` rather than the default generator: a predictable

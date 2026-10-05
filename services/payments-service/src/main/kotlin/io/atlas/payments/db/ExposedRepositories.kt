@@ -116,6 +116,14 @@ class ExposedTransactionRepository : TransactionRepository {
             .singleOrNull()?.toTxRecord()
     }
 
+    override fun findByProviderRef(projectId: UUID, providerRef: String): TxRecord? = transaction {
+        // Served by the partial unique index idx_transactions_project_provider_ref
+        // (migration 0090) — a point lookup, not a scan.
+        Transactions.selectAll()
+            .where { (Transactions.projectId eq projectId) and (Transactions.providerRef eq providerRef) }
+            .singleOrNull()?.toTxRecord()
+    }
+
     override fun insertPending(
         projectId: UUID,
         fromWallet: UUID?,

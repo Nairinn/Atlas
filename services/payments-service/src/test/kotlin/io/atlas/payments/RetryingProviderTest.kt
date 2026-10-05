@@ -1,5 +1,6 @@
 package io.atlas.payments
 
+import io.atlas.payments.core.ChargeRequest
 import io.atlas.payments.core.PaymentProvider
 import io.atlas.payments.core.ProviderResult
 import io.atlas.payments.core.ProviderStatus
@@ -21,6 +22,9 @@ import kotlin.test.assertTrue
  */
 class RetryingProviderTest {
 
+    private val P1 = java.util.UUID.fromString("11111111-1111-1111-1111-111111111111")
+    private val U1 = java.util.UUID.fromString("aaaaaaaa-1111-1111-1111-111111111111")
+
     /** Fails its first [failures] calls, then succeeds. */
     private class FlakyProvider(
         private val failures: Int = 0,
@@ -37,27 +41,27 @@ class RetryingProviderTest {
             if (n <= failures) throw RuntimeException("transient provider error")
         }
 
-        override fun authorize(amountCents: Long, idempotencyKey: String): ProviderResult {
+        override fun authorize(request: ChargeRequest, idempotencyKey: String): ProviderResult {
             maybeFail(authorizeCalls.incrementAndGet())
             return ProviderResult(true, "ref_ok")
         }
 
-        override fun capture(providerRef: String): ProviderResult {
+        override fun capture(projectId: java.util.UUID, providerRef: String): ProviderResult {
             maybeFail(captureCalls.incrementAndGet())
             return ProviderResult(true, providerRef)
         }
 
-        override fun refund(providerRef: String): ProviderResult {
+        override fun refund(projectId: java.util.UUID, providerRef: String): ProviderResult {
             maybeFail(refundCalls.incrementAndGet())
             return ProviderResult(true, providerRef)
         }
 
-        override fun lookup(providerRef: String): ProviderStatus {
+        override fun lookup(projectId: java.util.UUID, providerRef: String): ProviderStatus {
             maybeFail(lookupCalls.incrementAndGet())
             return ProviderStatus.CAPTURED
         }
 
-        override fun verifyWebhook(payload: String, signature: String?) = true
+        override fun verifyWebhook(projectId: java.util.UUID, payload: String, signature: String?) = true
     }
 
     private fun wrap(
@@ -83,7 +87,7 @@ class RetryingProviderTest {
     @Test
     fun `authorize is retried and eventually succeeds`() {
         val flaky = FlakyProvider(failures = 2)
-        val result = wrap(flaky).authorize(1_000, "key-1")
+        val result = wrap(flaky).authorize(ChargeRequest(P1, U1, 1_000), "key-1")
 
         assertTrue(result.success)
         assertEquals(3, flaky.authorizeCalls.get(), "two failures, then success")
@@ -93,14 +97,14 @@ class RetryingProviderTest {
     @Test
     fun `lookup is retried`() {
         val flaky = FlakyProvider(failures = 1)
-        assertEquals(ProviderStatus.CAPTURED, wrap(flaky).lookup("ref"))
+        assertEquals(ProviderStatus.CAPTURED, wrap(flaky).lookup(P1, "ref"))
         assertEquals(2, flaky.lookupCalls.get())
     }
 
     @Test
     fun `retries are bounded and the last error surfaces`() {
         val flaky = FlakyProvider(failures = 99)
-        assertFailsWith<RuntimeException> { wrap(flaky, attempts = 3).authorize(1_000, "k") }
+        assertFailsWith<RuntimeException> { wrap(flaky, attempts = 3).authorize(ChargeRequest(P1, U1, 1_000), "k") }
         assertEquals(3, flaky.authorizeCalls.get(), "no more than maxAttempts")
     }
 
@@ -119,14 +123,14 @@ class RetryingProviderTest {
     @Test
     fun `capture is attempted exactly once`() {
         val flaky = FlakyProvider(failures = 99)
-        assertFailsWith<RuntimeException> { wrap(flaky).capture("ref") }
+        assertFailsWith<RuntimeException> { wrap(flaky).capture(P1, "ref") }
         assertEquals(1, flaky.captureCalls.get(), "a retried capture could charge twice")
     }
 
     @Test
     fun `refund is attempted exactly once`() {
         val flaky = FlakyProvider(failures = 99)
-        assertFailsWith<RuntimeException> { wrap(flaky).refund("ref") }
+        assertFailsWith<RuntimeException> { wrap(flaky).refund(P1, "ref") }
         assertEquals(1, flaky.refundCalls.get(), "a retried refund could pay out twice")
     }
 
@@ -143,7 +147,7 @@ class RetryingProviderTest {
         val started = System.currentTimeMillis()
 
         assertFailsWith<ProviderTimeout> {
-            wrap(slow, attempts = 1, timeout = Duration.ofMillis(200)).capture("ref")
+            wrap(slow, attempts = 1, timeout = Duration.ofMillis(200)).capture(P1, "ref")
         }
 
         val elapsed = System.currentTimeMillis() - started
@@ -154,7 +158,7 @@ class RetryingProviderTest {
     fun `a timeout on a retryable call is retried, then gives up`() {
         val slow = FlakyProvider(hangFor = Duration.ofSeconds(30))
         assertFailsWith<ProviderTimeout> {
-            wrap(slow, attempts = 2, timeout = Duration.ofMillis(150)).authorize(100, "k")
+            wrap(slow, attempts = 2, timeout = Duration.ofMillis(150)).authorize(ChargeRequest(P1, U1, 100), "k")
         }
     }
 
@@ -162,6 +166,6 @@ class RetryingProviderTest {
     fun `webhook verification is not wrapped in a network timeout`() {
         // It is local and cheap; routing it through the executor would add
         // a thread hop to every webhook for nothing.
-        assertTrue(wrap(FlakyProvider()).verifyWebhook("{}", "sig"))
+        assertTrue(wrap(FlakyProvider()).verifyWebhook(P1, "{}", "sig"))
     }
 }

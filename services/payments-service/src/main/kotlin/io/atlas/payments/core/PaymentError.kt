@@ -26,6 +26,15 @@ sealed class PaymentError(message: String) : Exception(message) {
      * for which user ids exist elsewhere on the platform.
      */
     class UnknownUser(userId: UUID) : PaymentError("no such user in this project: $userId")
+
+    /**
+     * A charge named a payee who has not finished connecting a payout
+     * account. FAILED_PRECONDITION rather than a provider decline: the
+     * payer did nothing wrong and no money moved — the app should send
+     * the payee to onboarding, not show a card error.
+     */
+    class DriverNotOnboarded(userId: UUID) :
+        PaymentError("payee $userId has no connected payout account; send them to onboarding first")
 }
 
 /**

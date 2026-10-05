@@ -635,6 +635,63 @@ paths:
         "409": { $ref: "#/components/responses/IdempotencyConflict" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
+  /v1/payments/connected-accounts:
+    post:
+      tags: [payments]
+      summary: Start Connect payout onboarding for the caller
+      description: |
+        Creates (or resumes) the caller's own payout account with the
+        project's payment processor and returns the hosted onboarding
+        URL. The app must redirect immediately — the URL is single-use
+        and short-lived.
+
+        Like deposits, this is safe to expose because the account being
+        created is the token subject's: a caller can only onboard
+        themselves as a payee.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [return_url]
+              properties:
+                return_url:
+                  type: string
+                  description: Absolute URL the processor returns the user to.
+      responses:
+        "201":
+          description: Onboarding started.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  onboarding_url: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    get:
+      tags: [payments]
+      summary: The caller's payout account status
+      description: |
+        Whether the caller has connected a payout account and whether
+        the processor has finished verifying it. A transaction naming
+        this user as payee fails until payouts_enabled is true.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exists: { type: boolean }
+                  payouts_enabled: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
   /v1/payments/transactions:
     post:
       tags: [payments]
@@ -828,6 +885,14 @@ components:
       description: |
         No email provider is configured, so this flow cannot work. Login
         and registration are unaffected.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unprocessable:
+      description: |
+        The request is well-formed but cannot be applied — for example
+        onboarding a payee against a deployment whose project has not
+        connected a payout processor.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

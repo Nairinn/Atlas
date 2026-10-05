@@ -33,6 +33,14 @@ class PaymentsService(
     private val runner: TransactionRunner,
     private val provider: PaymentProvider,
     private val fareTopic: String,
+    private val payoutAccounts: PayoutAccountSource? = null,
+    /**
+     * Starts Connect onboarding for a user and returns the hosted URL.
+     * Injected rather than taken from [PayoutAccountSource] because the
+     * flow is "network call, then persist" — a composite the Stripe
+     * onboarding adapter owns, not the read-mostly payout source.
+     */
+    private val onboardingStarter: ((projectId: UUID, userId: UUID, returnUrl: String) -> String)? = null,
     private val clock: Clock = Clock.systemUTC(),
     private val metrics: PaymentsMetrics = PaymentsMetrics.NOOP,
 ) {
@@ -90,7 +98,17 @@ class PaymentsService(
             )
         }
 
-        val auth = provider.authorize(amountCents, idempotencyKey)
+        val auth = provider.authorize(
+            ChargeRequest(
+                projectId = projectId,
+                userId = userUuid,
+                amountCents = amountCents,
+                // No destination and no fee: a deposit pays nobody but the
+                // depositor, and the tenant has not yet earned a cut of
+                // money the user just put in.
+            ),
+            idempotencyKey,
+        )
         if (!auth.success) throw PaymentError.ProviderDeclined(auth.message ?: "authorize declined")
 
         val pending = try {
@@ -118,7 +136,7 @@ class PaymentsService(
             return DepositResult(winner.id, winner.status, walletBalance(projectId, userId).balanceCents)
         }
 
-        val capture = provider.capture(auth.providerRef)
+        val capture = provider.capture(projectId, auth.providerRef)
         if (!capture.success) {
             // The charge was refused, so leaving the row pending would have
             // the reconciliation sweep retry a capture the provider has
@@ -158,8 +176,20 @@ class PaymentsService(
         amountCents: Long,
         idempotencyKey: String,
         rideId: String,
+        applicationFeeCents: Long = 0,
     ): InitiateResult {
         if (amountCents <= 0) throw PaymentError.InvalidAmount(amountCents)
+        if (applicationFeeCents < 0) {
+            throw PaymentError.InvalidArgument("application_fee_cents must not be negative")
+        }
+        // A fee taken out of the amount must leave the payee something;
+        // Stripe rejects fee >= amount, and the error it returns names
+        // Stripe internals this API does not expose.
+        if (applicationFeeCents >= amountCents) {
+            throw PaymentError.InvalidArgument(
+                "application_fee_cents ($applicationFeeCents) must be less than amount_cents ($amountCents)",
+            )
+        }
         if (idempotencyKey.isBlank()) throw PaymentError.InvalidArgument("idempotency_key is required")
         val fromUuid = parseUuid(fromUserId, "from_user_id")
         val toUuid = parseUuid(toUserId, "to_user_id")
@@ -178,7 +208,23 @@ class PaymentsService(
         }
 
         // Authorize against the provider BEFORE opening the db transaction.
-        val auth = provider.authorize(amountCents, idempotencyKey)
+        val auth = provider.authorize(
+            ChargeRequest(
+                projectId = projectId,
+                userId = fromUuid,
+                amountCents = amountCents,
+                // The payee's connected account is what makes this a
+                // Connect destination charge rather than a plain transfer:
+                // the tenant's Stripe account charges the rider, Stripe
+                // moves the driver's share to the destination, and the
+                // application fee stays with the tenant. Both are resolved
+                // by the provider from the project — the service does not
+                // know they are Stripe concepts.
+                destinationAccountId = destinationAccountOf(projectId, toUuid),
+                applicationFeeCents = applicationFeeCents.takeIf { it > 0 },
+            ),
+            idempotencyKey,
+        )
         if (!auth.success) throw PaymentError.ProviderDeclined(auth.message ?: "authorize declined")
 
         val txId = try {
@@ -227,7 +273,7 @@ class PaymentsService(
             else -> throw PaymentError.InvalidState("cannot settle a ${tx.status} transaction")
         }
 
-        val capture = provider.capture(tx.providerRef ?: "")
+        val capture = provider.capture(projectId, tx.providerRef ?: "")
         if (!capture.success) throw PaymentError.ProviderDeclined(capture.message ?: "capture declined")
 
         runner.run {
@@ -261,7 +307,7 @@ class PaymentsService(
             else -> throw PaymentError.InvalidState("can only refund a settled transaction; status=${tx.status}")
         }
 
-        val refund = provider.refund(tx.providerRef ?: "")
+        val refund = provider.refund(projectId, tx.providerRef ?: "")
         if (!refund.success) throw PaymentError.ProviderDeclined(refund.message ?: "refund declined")
 
         runner.run {
@@ -289,7 +335,66 @@ class PaymentsService(
         }
     }
 
+    // --- Connect onboarding ------------------------------------------------
+
+    /**
+     * The caller's payout account, for the app to decide whether to show
+     * "add payout account" or "payouts ready".
+     */
+    fun connectAccountStatus(projectId: UUID, userId: String): ConnectAccountStatus {
+        val uuid = parseUuid(userId, "user_id")
+        val accounts = payoutAccounts
+            ?: return ConnectAccountStatus(exists = false, payoutsEnabled = false)
+        val account = accounts.accountFor(projectId, uuid)
+        return ConnectAccountStatus(
+            exists = account != null,
+            payoutsEnabled = account?.payoutsEnabled ?: false,
+        )
+    }
+
+    data class ConnectAccountStatus(val exists: Boolean, val payoutsEnabled: Boolean)
+
+    /**
+     * Create (or resume) the caller's connected payout account and return
+     * Stripe's hosted onboarding URL.
+     *
+     * The Stripe call happens BEFORE any database write, deliberately:
+     * the network side effects are idempotent in the worst direction. If
+     * the process dies after creating the account at Stripe but before
+     * saving the row, the next call re-creates — Connect treats a second
+     * create for the same user as a new account, which wastes nothing but
+     * an unused Stripe account row. The reverse order (row first) would
+     * leave a row pointing at nothing, which authorize would then trust.
+     */
+    fun startConnectOnboarding(projectId: UUID, userId: String, returnUrl: String): String {
+        val uuid = parseUuid(userId, "user_id")
+        val starter = onboardingStarter
+            ?: throw PaymentError.InvalidState(
+                "this deployment does not support Connect onboarding",
+            )
+        return starter(projectId, uuid, returnUrl).also {
+            LOG.info("connect onboarding started for user={} project={}", userId, projectId)
+        }
+    }
+
     // --- helpers ----------------------------------------------------------
+
+    /**
+     * The payee's connected payout account, when Connect onboarding is
+     * wired. A provider that is not Connect-aware (the fake) needs no
+     * destination: null means "plain charge", which is correct for it.
+     *
+     * A real payee with NO account is NOT null-able here — the caller has
+     * named a recipient who cannot be paid, and the provider will refuse
+     * with DriverNotOnboarded rather than charging the payer for a ride
+     * that can never be settled.
+     */
+    private fun destinationAccountOf(projectId: UUID, toUuid: UUID): String? {
+        val accounts = payoutAccounts ?: return null
+        val account = accounts.accountFor(projectId, toUuid) ?: return null
+        if (!account.payoutsEnabled) return null
+        return account.stripeAccountId
+    }
 
     private fun rideRef(tx: TxRecord): String = tx.rideId?.toString() ?: ""
 

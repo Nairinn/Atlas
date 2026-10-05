@@ -154,6 +154,17 @@ pub struct Transaction {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct OnboardingUrl {
+    pub onboarding_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PayoutAccountStatus {
+    pub exists: bool,
+    pub payouts_enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Deleted {
     pub deleted: bool,
 }

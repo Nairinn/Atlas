@@ -154,11 +154,20 @@ services:
       migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
     environment:
-      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      DATABASE_URL: postgres://atlas:***@postgres:5432/atlas
       KAFKA_BROKERS: kafka:29092
       KAFKA_TOPIC_FARE_EVENTS: atlas.fare.events
       GRPC_PORT: "50053"
       HTTP_PORT: "8053"
+      # The default provider for projects with no Stripe row. Per-project
+      # overrides live in control.project_payment_config.
+      PAYMENT_PROVIDER: "fake"
+      # Uncomment to enable Stripe for projects configured with a
+      # control.project_payment_config row. Generate with:
+      #   openssl rand -hex 32
+      # PAYMENT_CONFIG_ENC_KEY: "<32-byte hex or base64>"
+      # Point the Stripe adapter at stripe-mock instead of api.stripe.com:
+      # STRIPE_API_BASE: "http://host.docker.internal:12111"
 
   # --- Phase 5: gateway (Rust/Axum) -----------------------------------------
   # The only service that should ever be published to the outside world.

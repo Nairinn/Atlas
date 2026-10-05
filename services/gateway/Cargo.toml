@@ -29,6 +29,10 @@ sha2 = { workspace = true }
 sqlx = { workspace = true }
 uuid = { workspace = true }
 atlas-keys = { workspace = true }
+# return_url validation on /v1/payments/connected-accounts: the payout
+# provider requires an absolute URL, and checking here keeps the error in
+# Atlas's vocabulary. No async needed, hence no reqwest.
+url = "2"
 
 [build-dependencies]
 tonic-build = { workspace = true }

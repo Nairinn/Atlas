@@ -39,7 +39,10 @@ use tonic::Request;
 
 use crate::error::ApiError;
 use crate::extract::AuthUser;
-use crate::pb::payments::{DepositRequest, TransactionRequest, WalletRequest};
+use crate::pb::payments::{
+    CreateConnectAccountRequest, DepositRequest, GetConnectAccountRequest, TransactionRequest,
+    WalletRequest,
+};
 use crate::state::AppState;
 use crate::validate;
 
@@ -52,6 +55,8 @@ pub fn routes() -> Router<AppState> {
         .route("/wallet", get(wallet))
         .route("/deposits", post(deposit))
         .route("/transactions", post(initiate))
+        .route("/connected-accounts", post(create_connect_account))
+        .route("/connected-accounts", get(get_connect_account))
 }
 
 #[derive(Debug, Serialize)]
@@ -205,6 +210,10 @@ async fn initiate(
             // Blank is meaningful: payments reads an empty ride_id as
             // NULL rather than trying to parse it as a UUID.
             ride_id: body.ride_id.unwrap_or_default(),
+            // The tenant's cut is configured per project on the payments
+            // side, not chosen per request by the caller — a caller
+            // setting their own fee would be setting their own discount.
+            application_fee_cents: 0,
         }))
         .await
         .map_err(|s| ApiError::upstream("payments", s))?
@@ -217,4 +226,93 @@ async fn initiate(
             status: resp.status,
         }),
     ))
+}
+
+// --- Connect onboarding ------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CreateConnectAccountBody {
+    /// Where the payout provider should return the user after onboarding.
+    /// Must be an absolute URL your app owns; it is sent to Stripe as the
+    /// account link's return_url.
+    pub return_url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectAccountOut {
+    pub onboarding_url: String,
+}
+
+/// Start Connect onboarding for the CALLER's own payout account.
+///
+/// Same scoping rule as deposits: the account created belongs to the
+/// token's subject, so a caller can only ever onboard themselves as a
+/// payee. The URL is single-use and short-lived — the app must redirect
+/// immediately.
+async fn create_connect_account(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<CreateConnectAccountBody>,
+) -> Result<(StatusCode, Json<ConnectAccountOut>), ApiError> {
+    if body.return_url.trim().is_empty() {
+        return Err(ApiError::BadRequest("return_url is required".to_string()));
+    }
+    // Stripe requires an absolute URL. Rejecting here keeps the error in
+    // Atlas's vocabulary rather than Stripe's. `Url::parse` accepting a
+    // scheme is the check: "https://…" parses, "myapp://return" also
+    // parses (fine — mobile apps use custom schemes), "return" does not.
+    if url::Url::parse(body.return_url.trim()).is_err() {
+        return Err(ApiError::BadRequest(
+            "return_url must be an absolute URL".to_string(),
+        ));
+    }
+
+    let resp = state
+        .payments
+        .clone()
+        .create_connect_account(Request::new(CreateConnectAccountRequest {
+            project_id: user.project_id,
+            user_id: user.user_id,
+            return_url: body.return_url.trim().to_string(),
+        }))
+        .await
+        .map_err(|s| ApiError::upstream("payments", s))?
+        .into_inner();
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ConnectAccountOut {
+            onboarding_url: resp.onboarding_url,
+        }),
+    ))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectAccountStatusOut {
+    pub exists: bool,
+    pub payouts_enabled: bool,
+}
+
+/// The caller's own payout-account status. There is no
+/// `GET /connected-accounts/:user_id` for the same reason there is no
+/// `GET /wallet/:user_id`: the id comes from the token.
+async fn get_connect_account(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<ConnectAccountStatusOut>, ApiError> {
+    let resp = state
+        .payments
+        .clone()
+        .get_connect_account(Request::new(GetConnectAccountRequest {
+            project_id: user.project_id,
+            user_id: user.user_id,
+        }))
+        .await
+        .map_err(|s| ApiError::upstream("payments", s))?
+        .into_inner();
+
+    Ok(Json(ConnectAccountStatusOut {
+        exists: resp.exists,
+        payouts_enabled: resp.payouts_enabled,
+    }))
 }

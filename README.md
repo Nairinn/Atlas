@@ -50,10 +50,12 @@ In active development. The repository currently contains:
 * **An OpenAPI description**, a restore drill, Prometheus alert rules, and
   a dependency scan — each with a CI check that fails when it drifts
 
-The one thing deliberately unfinished is the payment processor: the
-`PaymentProvider` seam and everything around it is built and tested, but
-no real processor is wired in. See **Payments** below for what that needs
-and why it is a business decision before it is an engineering one.
+The one thing deliberately unfinished on the money path is a live Stripe
+account per project: the `PaymentProvider` seam, the Stripe Connect
+adapter, onboarding, webhooks and everything around them are built, but
+no project has connected a real Stripe account yet. See **Payments**
+below for the shape and for why the part that remains is a business
+decision, not an engineering one.
 
 ### Database migrations
 
@@ -332,52 +334,57 @@ but carry no idempotency key of their own, and "usually idempotent" is not
 a property to bet customer money on. The recovery path for an ambiguous
 capture is the reconciliation sweep, not a repeat of the write.
 
-### Payments and the placeholder provider
+### Payments: Stripe Connect, and never holding the money
 
-`atlas.payments` runs against `FakePaymentProvider`, which approves every
-charge and mints `fake_*` references. That placeholder covers the **provider
-network call only**. Everything around it is real and exercised:
+`atlas.payments` answers the "who holds the money" question with a rule:
+**Atlas never holds funds.** Each project connects its own Stripe account
+(a row in `control.project_payment_config`, credentials stored
+AES-256-GCM-encrypted under `PAYMENT_CONFIG_ENC_KEY`), and each payee — a
+ride's driver — gets a Stripe Express connected account under it. Money is
+charged, held, and paid out by Stripe, on the tenant's account. Internal
+wallets are a mirror of what happened at the processor, not stored value
+Atlas owes anyone — which is how the platform stays outside money-
+transmitter licensing rather than merely hoping to.
+
+A fare is a **destination charge**: the tenant's Stripe account charges
+the rider with `capture_method=manual`, `transfer_data.destination` = the
+driver's connected account, and `application_fee_amount` = the tenant's
+cut. Capture happens at settlement; Stripe moves the driver's share and
+keeps the fee with the tenant in the same operation. Payouts from there
+are Stripe's business — which is why `WITHDRAWAL` exists in the
+transaction-kind constraint and will stay unimplemented: Atlas taking on
+payouts is Atlas taking custody, the exact thing this structure exists to
+avoid.
+
+Drivers onboard through the platform: `POST
+/v1/payments/connected-accounts` mints Stripe's hosted onboarding URL
+for the caller (the token subject — a caller can only set up payouts for
+themselves), and the `account.updated` webhook flips
+`payouts_enabled`, which is what gates whether a transaction naming them
+as payee can proceed.
+
+Everything around the processor call was already real and stays real:
 idempotency, the pending-then-capture ordering that keeps a crash
 recoverable, the transactional outbox, the ledger updates, and webhook
-signature verification.
+signature verification. `FakePaymentProvider` remains the default for
+projects with no Stripe row — one deployment can serve a test tenant on
+the fake and a paying tenant on Stripe, per project, via
+`PerProjectPaymentProvider`.
 
-Deposits are the only way money enters the platform — before them wallets
-sat at zero and settlement refused to move funds that were not there, so no
-transaction could ever complete.
+Deposits remain the only way money enters a wallet. The sweep for
+transactions left pending by a crash between capture and credit runs on a
+timer — see **Reconciliation, webhooks, and retries** above — and the
+per-project Stripe webhook endpoint (`POST /webhooks/stripe/{project_id}`,
+one signing secret per tenant) now **acts on** verified events rather
+than only logging them: `payment_intent.succeeded` and
+`payment_intent.amount_capturable_updated` settle the matching
+transaction, `charge.refunded` reverses it, `account.updated` updates
+payout readiness. Unknown event types are acknowledged and logged, never
+a 5xx — an event Atlas cannot act on must not be retried forever.
 
-Swapping in a real processor means implementing `PaymentProvider` and
-setting `PAYMENT_PROVIDER`. Nothing above the interface changes. An unknown
-value fails at startup rather than silently falling back to the fake, which
-in production would approve charges against money never collected.
-
-The sweep for transactions left pending by a crash between capture and
-credit now exists and runs on a timer — see **Reconciliation, webhooks,
-and retries** above.
-
-**Before pointing this at real money**, two things are outstanding, and
-only one of them is code.
-
-*The code:* implement `PaymentProvider` against a real processor —
-`authorize`, `capture`, `refund`, `lookup`, `verifyWebhook` — and have the
-webhook handler act on the events it verifies rather than only logging
-them. That is a contained piece of work; everything it plugs into is
-built.
-
-*The decision:* who holds the money. `payments.wallets` stores balances
-and transfers move them between users, which is close to the textbook
-definition of money transmission — a licensed activity in most
-jurisdictions, and true today regardless of which processor is wired in.
-The usual ways to stay outside it are a platform product where the
-processor and its bank partners hold the licence and the funds (Stripe
-Connect, Adyen for Platforms), or an agent-of-payee structure where Atlas
-never takes custody.
-
-This is why `WITHDRAWAL` appears in the transaction-kind constraint and is
-not implemented. Money can currently enter and move but never leave, which
-is the only reason the question has not yet been forced. **Implementing
-payouts is the point at which it must be answered** — the structure
-determines whether user-held balances are viable at all, so it is worth
-settling before that endpoint is written rather than after.
+*The remaining decision:* Stripe Connect keeps Atlas outside money
+transmission in the usual way, but jurisdictions differ and this is not
+legal advice — talk to a payments lawyer before live keys go in.
 
 Four RPCs are deliberately unrouted: `auth.IssueToken` and
 `payments.DrainOutbox` (both marked internal in their `.proto`), plus

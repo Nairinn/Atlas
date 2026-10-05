@@ -285,3 +285,25 @@ class Transaction {
   final String transactionId;
   final String status;
 }
+
+class OnboardingUrl {
+  OnboardingUrl({required this.onboardingUrl});
+
+  factory OnboardingUrl.fromJson(Map<String, dynamic> json) =>
+      OnboardingUrl(onboardingUrl: json['onboarding_url'] as String);
+
+  final String onboardingUrl;
+}
+
+class PayoutAccountStatus {
+  PayoutAccountStatus({required this.exists, required this.payoutsEnabled});
+
+  factory PayoutAccountStatus.fromJson(Map<String, dynamic> json) =>
+      PayoutAccountStatus(
+        exists: json['exists'] as bool,
+        payoutsEnabled: json['payouts_enabled'] as bool,
+      );
+
+  final bool exists;
+  final bool payoutsEnabled;
+}

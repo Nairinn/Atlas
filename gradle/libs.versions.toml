@@ -25,6 +25,9 @@ shadow-plugin = "8.1.1"
 # Micrometer's Prometheus registry for the /metrics endpoint.
 ktor = "2.3.13"
 micrometer = "1.13.6"
+# Stripe Connect adapter (the per-project processor; see
+# services/.../stripe/StripePaymentProvider.kt).
+stripe-java = "34.0.0"
 
 [libraries]
 # Database
@@ -68,6 +71,9 @@ ktor-serialization-jackson = { module = "io.ktor:ktor-serialization-jackson", ve
 
 # Metrics (Phase 4; Prometheus exposition for the payments /metrics scrape)
 micrometer-registry-prometheus = { module = "io.micrometer:micrometer-registry-prometheus", version.ref = "micrometer" }
+
+# Stripe (Connect: per-project processor accounts)
+stripe-java = { module = "com.stripe:stripe-java", version.ref = "stripe-java" }
 
 # Coroutines (Phase 2B; grpc-kotlin stubs are coroutine-based)
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }

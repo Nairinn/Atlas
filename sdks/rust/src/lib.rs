@@ -528,4 +528,29 @@ impl PaymentsApi<'_> {
             )
             .await
     }
+
+    /// Start payout onboarding for the CALLER's own account.
+    ///
+    /// The returned URL is single-use and short-lived: redirect the user
+    /// immediately. The account being onboarded is the token subject's,
+    /// so a caller can only ever set up payouts for themselves.
+    pub async fn start_payout_onboarding(&self, return_url: &str) -> Result<OnboardingUrl> {
+        self.client
+            .http
+            .send(
+                Request::post("/v1/payments/connected-accounts").json(serde_json::json!({
+                    "return_url": return_url,
+                })),
+            )
+            .await
+    }
+
+    /// The caller's own payout-account status. `payouts_enabled` is what
+    /// gates whether a transaction naming this user as payee can succeed.
+    pub async fn payout_account(&self) -> Result<PayoutAccountStatus> {
+        self.client
+            .http
+            .send(Request::get("/v1/payments/connected-accounts"))
+            .await
+    }
 }

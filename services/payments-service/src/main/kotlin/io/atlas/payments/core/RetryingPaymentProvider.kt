@@ -52,23 +52,23 @@ class RetryingPaymentProvider(
 
     override val name: String = "${delegate.name} (retrying)"
 
-    override fun authorize(amountCents: Long, idempotencyKey: String): ProviderResult =
-        withRetries("authorize") { delegate.authorize(amountCents, idempotencyKey) }
+    override fun authorize(request: ChargeRequest, idempotencyKey: String): ProviderResult =
+        withRetries("authorize") { delegate.authorize(request, idempotencyKey) }
 
-    override fun lookup(providerRef: String): ProviderStatus =
-        withRetries("lookup") { delegate.lookup(providerRef) }
-
-    /** Bounded by a timeout, but attempted once. See the class note. */
-    override fun capture(providerRef: String): ProviderResult =
-        withTimeout("capture") { delegate.capture(providerRef) }
+    override fun lookup(projectId: java.util.UUID, providerRef: String): ProviderStatus =
+        withRetries("lookup") { delegate.lookup(projectId, providerRef) }
 
     /** Bounded by a timeout, but attempted once. See the class note. */
-    override fun refund(providerRef: String): ProviderResult =
-        withTimeout("refund") { delegate.refund(providerRef) }
+    override fun capture(projectId: java.util.UUID, providerRef: String): ProviderResult =
+        withTimeout("capture") { delegate.capture(projectId, providerRef) }
+
+    /** Bounded by a timeout, but attempted once. See the class note. */
+    override fun refund(projectId: java.util.UUID, providerRef: String): ProviderResult =
+        withTimeout("refund") { delegate.refund(projectId, providerRef) }
 
     /** Local, cheap, and not a network call. */
-    override fun verifyWebhook(payload: String, signature: String?): Boolean =
-        delegate.verifyWebhook(payload, signature)
+    override fun verifyWebhook(projectId: java.util.UUID, payload: String, signature: String?): Boolean =
+        delegate.verifyWebhook(projectId, payload, signature)
 
     private fun <T> withRetries(op: String, call: () -> T): T {
         var last: Exception? = null
