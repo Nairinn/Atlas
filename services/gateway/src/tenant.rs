@@ -145,7 +145,7 @@ impl ProjectCache {
     /// attacker chooses how much memory the gateway uses.
     pub fn sweep(&self) {
         if let Ok(mut entries) = self.entries.write() {
-            entries.retain(|_, e| e.stored_at.elapsed() < self.ttl);
+            entries.retain(|_, e| e.stored_at.elapsed() < self.ttl_for(&e.value));
         }
     }
 
@@ -198,6 +198,9 @@ pub async fn resolve(pool: &PgPool, cache: &ProjectCache, key: &str) -> Result<T
 
     // One indexed lookup. `status` and `expires_at` are checked in SQL so
     // a revoked key never becomes a Tenant value in the first place.
+    // Scope is checked here too (D4): the data plane serves `data` keys;
+    // `admin` keys are for control-plane mutations and never carry user
+    // traffic.
     let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, String)>(
         r#"
         SELECT k.id, k.account_id, p.id, p.environment, k.key_prefix
@@ -210,6 +213,7 @@ pub async fn resolve(pool: &PgPool, cache: &ProjectCache, key: &str) -> Result<T
         JOIN control.projects p ON p.id = k.project_id
         WHERE k.key_hash = $1
           AND k.status = 'active'
+          AND k.scope = 'data'
           AND (k.expires_at IS NULL OR k.expires_at > NOW())
         "#,
     )

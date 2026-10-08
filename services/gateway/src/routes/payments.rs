@@ -263,14 +263,37 @@ async fn create_connect_account(
     if body.return_url.trim().is_empty() {
         return Err(ApiError::BadRequest("return_url is required".to_string()));
     }
-    // Stripe requires an absolute URL. Rejecting here keeps the error in
-    // Atlas's vocabulary rather than Stripe's. `Url::parse` accepting a
-    // scheme is the check: "https://…" parses, "myapp://return" also
-    // parses (fine — mobile apps use custom schemes), "return" does not.
-    if url::Url::parse(body.return_url.trim()).is_err() {
+    // Stripe requires an absolute https URL; bare http is allowed only for
+    // loopback, which is the local-dev case. Non-web schemes are not
+    // accepted: Stripe's own account-link validation rejects them in live
+    // mode, and an app scheme here would just fail later at Stripe with
+    // a less legible error.
+    let raw = body.return_url.trim();
+    if raw.len() > 2048 {
         return Err(ApiError::BadRequest(
-            "return_url must be an absolute URL".to_string(),
+            "return_url must be at most 2048 characters".to_string(),
         ));
+    }
+    match url::Url::parse(raw) {
+        Ok(parsed) => {
+            let host = parsed.host_str().unwrap_or_default();
+            let loopback = host == "localhost" || host == "127.0.0.1" || host == "[::1]";
+            let ok = match parsed.scheme() {
+                "https" => true,
+                "http" => loopback,
+                _ => false,
+            };
+            if !ok {
+                return Err(ApiError::BadRequest(
+                    "return_url must be https (or http for localhost)".to_string(),
+                ));
+            }
+        }
+        Err(_) => {
+            return Err(ApiError::BadRequest(
+                "return_url must be an absolute URL".to_string(),
+            ));
+        }
     }
 
     let resp = state

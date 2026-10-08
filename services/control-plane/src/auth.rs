@@ -29,6 +29,9 @@ pub struct AuthedKey {
     /// act on any project in its account.
     pub project_id: Option<Uuid>,
     pub prefix: String,
+    /// 'data' or 'admin' (D4). Mutations here require admin; the gateway
+    /// requires data.
+    pub scope: String,
 }
 
 impl AuthedKey {
@@ -43,6 +46,20 @@ impl AuthedKey {
             Some(scoped) => scoped == project_id,
         }
     }
+
+    /// 403 unless this key may mutate the control plane (D4: `admin`).
+    /// Called from every write handler; reads stay open to any scope.
+    /// The account row itself is public-by-rate-limit (POST /v1/accounts),
+    /// so it is not guarded here.
+    pub fn require_admin(&self) -> Result<(), ApiError> {
+        if self.scope == "admin" {
+            Ok(())
+        } else {
+            Err(ApiError::Forbidden(
+                "this key is data-scoped; control-plane mutations need an admin key".into(),
+            ))
+        }
+    }
 }
 
 struct KeyRow {
@@ -52,6 +69,7 @@ struct KeyRow {
     key_prefix: String,
     status: String,
     expires_at: Option<DateTime<Utc>>,
+    scope: String,
 }
 
 #[async_trait]
@@ -88,10 +106,11 @@ impl FromRequestParts<AppState> for AuthedKey {
                 String,
                 String,
                 Option<DateTime<Utc>>,
+                String,
             ),
         >(
             r#"
-            SELECT id, account_id, project_id, key_prefix, status, expires_at
+            SELECT id, account_id, project_id, key_prefix, status, expires_at, scope
             FROM control.api_keys
             WHERE key_hash = $1
             "#,
@@ -106,6 +125,7 @@ impl FromRequestParts<AppState> for AuthedKey {
             key_prefix: r.3,
             status: r.4,
             expires_at: r.5,
+            scope: r.6,
         });
 
         // One message for "no such key", "revoked", and "expired" alike.
@@ -128,6 +148,7 @@ impl FromRequestParts<AppState> for AuthedKey {
             account_id: row.account_id,
             project_id: row.project_id,
             prefix: row.key_prefix,
+            scope: row.scope,
         })
     }
 }
@@ -206,6 +227,7 @@ mod tests {
             account_id: Uuid::new_v4(),
             project_id: None,
             prefix: "atl_live_abcd".into(),
+            scope: "admin".into(),
         };
         assert!(key.may_access(Uuid::new_v4()));
     }
@@ -219,6 +241,7 @@ mod tests {
             account_id: Uuid::new_v4(),
             project_id: Some(mine),
             prefix: "atl_live_abcd".into(),
+            scope: "admin".into(),
         };
         assert!(key.may_access(mine));
         assert!(

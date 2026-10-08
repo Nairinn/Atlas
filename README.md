@@ -104,7 +104,7 @@ atlas logs auth   # tail logs for a given service
 atlas keys list   # manage API keys
 ```
 
-The CLI still defaults to an in-memory mock transport, so it works with no backend at all. Pass `--live` to talk to a real control plane.
+The CLI talks to the real control plane by default. Pass `--mock` (or set `ATLAS_MOCK=1`) to exercise commands against deterministic in-memory responses without touching anything; every mock run prints `[MOCK — nothing was changed]`.
 
 ### Going live
 
@@ -122,10 +122,10 @@ curl -sX POST http://localhost:8081/v1/accounts \
 Paste that `api_key` into `atlas.toml` as `project.api_key` (it is shown once and is not recoverable), then:
 
 ```bash
-atlas deploy --live      # creates the project; idempotent on re-run
-atlas status --live      # live gRPC health probes + real gateway metrics
-atlas keys create ci --expiry 90d --live
-atlas logs --live        # the project's audit trail
+atlas deploy             # creates the project; idempotent on re-run
+atlas status             # live gRPC health probes
+atlas keys create ci --expiry 90d --scope admin
+atlas logs               # the project's audit trail (--since, --limit, and a service filter work)
 ```
 
 Key prefixes name their tier: `atl_dev_` (development), `atl_test_` (test), `atl_live_` (live). The curl above mints a dev key because the control plane is running locally; `atlas keys create` on a live deployment mints `atl_live_`.
@@ -136,7 +136,7 @@ Key prefixes name their tier: `atl_dev_` (development), `atl_test_` (test), `atl
 
 `healthy` is a live probe on every call: a gRPC `Health/Check` against auth, geo, and payments, and a TCP connect to Kafka for `events`. Nothing is cached, so a service that dies is `DOWN` on the next invocation.
 
-The three numeric columns are parsed from the gateway's Prometheus endpoint, the only place per-request data exists. Two caveats: `requests_24h` is really "since the gateway process started" (a true 24-hour window needs a time-series database to difference the counter, which is Prometheus' job), and `events` has no gateway routes so its counters are always zero; only its health means anything.
+The usage columns (`p95`, requests, error rate) are currently null, and the response says `"scope": "platform"`: the gateway's counters carry no project label, so the only honest number is platform-wide traffic, which is not this project's. They come back once gateway metrics are labelled by tenant. `healthy` is unaffected.
 
 ## HTTP API
 

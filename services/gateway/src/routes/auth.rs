@@ -264,15 +264,26 @@ async fn request_password_reset(
 ) -> Result<(StatusCode, Json<AcceptedOut>), ApiError> {
     // Not even the empty case is rejected differently: a 400 here would
     // still be a distinguishable response, and there is no value in
-    // telling a caller their empty string is empty.
-    let _ = state
+    // telling a caller their empty string is empty. Non-auth failures
+    // are logged though: a 202 that swallowed a 500 leaves nobody to
+    // notice that reset emails stopped going out.
+    if let Err(status) = state
         .auth
         .clone()
         .request_password_reset(Request::new(RequestPasswordResetRequest {
             email: body.email,
             project_id: tenant.project_id.to_string(),
         }))
-        .await;
+        .await
+    {
+        if status.code() != tonic::Code::NotFound {
+            tracing::warn!(
+                code = ?status.code(),
+                detail = status.message(),
+                "password reset request failed upstream; still answering 202"
+            );
+        }
+    }
 
     Ok((StatusCode::ACCEPTED, Json(AcceptedOut { accepted: true })))
 }
@@ -332,14 +343,25 @@ async fn request_email_verification(
     tenant: Tenant,
     Json(body): Json<EmailBody>,
 ) -> Result<(StatusCode, Json<AcceptedOut>), ApiError> {
-    let _ = state
+    if let Err(status) = state
         .auth
         .clone()
         .request_email_verification(Request::new(RequestEmailVerificationRequest {
             email: body.email,
             project_id: tenant.project_id.to_string(),
         }))
-        .await;
+        .await
+    {
+        // NotFound is the "no such address" answer we mean to swallow;
+        // anything else means the flow is broken and must be visible.
+        if status.code() != tonic::Code::NotFound {
+            tracing::warn!(
+                code = ?status.code(),
+                detail = status.message(),
+                "email verification request failed upstream; still answering 202"
+            );
+        }
+    }
 
     Ok((StatusCode::ACCEPTED, Json(AcceptedOut { accepted: true })))
 }

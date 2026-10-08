@@ -29,15 +29,12 @@
 //! the key is presented on each one.
 
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 /// Schemes accepted by the CLI, keyed by project environment.
 pub const SCHEME_LIVE: &str = "atl_live_";
 pub const SCHEME_TEST: &str = "atl_test_";
 pub const SCHEME_DEV: &str = "atl_dev_";
 
-/// Number of secret characters after the scheme. 32 hex chars = 128 bits.
-const SECRET_LEN: usize = 32;
 /// How many secret characters appear in the display prefix. Matches the
 /// `atl_live_abcd` shape the CLI renders.
 const PREFIX_SECRET_CHARS: usize = 4;
@@ -67,19 +64,33 @@ pub fn scheme_for(environment: &str) -> &'static str {
 
 /// Mint a key for the given environment.
 ///
-/// Randomness comes from two v4 UUIDs. `uuid`'s v4 constructor draws from
-/// `getrandom`, i.e. the OS CSPRNG, so this is suitable for a credential;
-/// two of them give 244 random bits, of which the first 128 are kept.
+/// The secret is 16 bytes drawn straight from the OS CSPRNG, hex-encoded
+/// to 32 characters = 128 bits. A UUID's v4 layout would reserve 6 bits
+/// for version/variant fields, so deriving entropy from UUIDs loses
+/// those bits; reading the CSPRNG directly keeps all 128 and is shorter
+/// to reason about.
+///
+/// Prefix collisions within a project are handled by the caller (the
+/// control plane re-rolls against the project's existing active keys)
+/// and backstopped by a unique index; see migration 0110.
 pub fn generate(environment: &str) -> GeneratedKey {
     let scheme = scheme_for(environment);
-    let entropy = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    let secret: String = entropy.chars().take(SECRET_LEN).collect();
+    let bytes = rand_bytes();
+    let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let plaintext = format!("{scheme}{secret}");
     GeneratedKey {
         prefix: prefix_of(&plaintext),
         hash: hash(&plaintext),
         plaintext,
     }
+}
+
+/// 16 bytes from the OS CSPRNG. `getrandom` is what `uuid::Uuid::new_v4`
+/// uses internally; calling it directly drops the UUID framing.
+fn rand_bytes() -> [u8; 16] {
+    let mut buf = [0u8; 16];
+    getrandom::getrandom(&mut buf).expect("OS CSPRNG unavailable");
+    buf
 }
 
 /// SHA-256, lowercase hex. This is what the `control.api_keys.key_hash`

@@ -57,15 +57,23 @@ pub struct ProvisionedService {
 pub struct StatusResponse {
     pub project_name: String,
     pub services: Vec<ServiceStatus>,
+    /// "platform": the usage numbers are scraped from the gateway's
+    /// process-wide counters, which do not carry a project label — every
+    /// tenant's traffic is in them. Null until they do.
+    pub scope: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ServiceStatus {
     pub name: String,
     pub healthy: bool,
-    pub p95_latency_ms: u32,
-    pub requests_24h: u64,
-    pub error_rate: f64,
+    /// Usage fields are null until gateway metrics carry a project
+    /// label: the platform-wide counter mixes every tenant's traffic,
+    /// and reporting it as this project's would be a wrong number that
+    /// looks exact.
+    pub p95_latency_ms: Option<u32>,
+    pub requests_24h: Option<u64>,
+    pub error_rate: Option<f64>,
 }
 
 // --- logs -------------------------------------------------------------------
@@ -84,6 +92,7 @@ pub struct LogLine {
 
 #[derive(Debug, Serialize)]
 pub struct ApiKeyView {
+    pub scope: String,
     pub name: String,
     pub prefix: String,
     pub created_at: String,
@@ -98,6 +107,9 @@ pub struct ApiKeyView {
 pub struct CreateKeyRequest {
     pub name: String,
     pub expiry: KeyExpiry,
+    /// 'data' (default, gateway only) or 'admin' (also control-plane
+    /// mutations). Absent means data: the smaller grant.
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +189,7 @@ mod tests {
                 created_at: "2026-04-20T11:02:18Z".into(),
                 last_used_at: None,
                 status: "active".into(),
+                scope: "data".into(),
             },
             api_key: "atl_live_ef01deadbeef".into(),
         };

@@ -59,6 +59,10 @@ pub struct RateLimitConfig {
     /// Requests per minute for account creation, per client address.
     /// Deliberately tiny: signing up is a once-per-person action.
     pub signup_per_minute: u32,
+    /// Per-address requests per minute applied to every non-exempt
+    /// request. The anti-rotation cap: without it a client minting fresh
+    /// bearer strings gets a fresh token bucket per request.
+    pub ip_ceiling_per_minute: u32,
     /// How many proxies sit in front of this service. See [`client_key`].
     pub trusted_proxy_hops: usize,
     pub enabled: bool,
@@ -73,6 +77,10 @@ impl Default for RateLimitConfig {
             // Three signups a minute from one address. A person creating a
             // second account for a colleague is fine; a script is not.
             signup_per_minute: 3,
+            // CLI traffic is a handful of calls per invocation; an order
+            // of magnitude above the per-key quota covers an office of
+            // them behind one egress while capping token rotation.
+            ip_ceiling_per_minute: 1200,
             trusted_proxy_hops: 0,
             enabled: true,
         }
@@ -82,6 +90,8 @@ impl Default for RateLimitConfig {
 pub struct Limiters {
     default: Keyed,
     signup: Keyed,
+    /// Per-address cap on every non-exempt request; see the config field.
+    ip_ceiling: Keyed,
     config: RateLimitConfig,
 }
 
@@ -97,6 +107,7 @@ impl Limiters {
         Arc::new(Self {
             default: RateLimiter::keyed(quota(config.default_per_minute)),
             signup: RateLimiter::keyed(quota(config.signup_per_minute)),
+            ip_ceiling: RateLimiter::keyed(quota(config.ip_ceiling_per_minute)),
             config,
         })
     }
@@ -109,6 +120,7 @@ impl Limiters {
     pub fn retain_recent(&self) {
         self.default.retain_recent();
         self.signup.retain_recent();
+        self.ip_ceiling.retain_recent();
     }
 
     /// Spawn the periodic sweep. Cheap: it walks only live keys.
@@ -241,6 +253,23 @@ async fn check(
         return next.run(req).await;
     }
     let signup = is_signup_path(&path);
+
+    // Per-address ceiling on every non-exempt request, so rotating bearer
+    // strings cannot mint fresh token buckets. Checked before the
+    // primary bucket for the same reason as the gateway.
+    let ip_key = format!(
+        "ip:{}",
+        client_key(req.headers(), peer, limiters.config.trusted_proxy_hops)
+    );
+    if let Err(negative) = limiters.ip_ceiling.check_key(&ip_key) {
+        let wait = negative.wait_time_from(DefaultClock::default().now());
+        metrics::counter!(
+            "atlas_control_plane_rate_limited_total",
+            "scope" => "ip_ceiling",
+        )
+        .increment(1);
+        return too_many_requests(wait);
+    }
 
     // Signup has no credential to key on by definition, so it is keyed by
     // address. Everything else prefers the API key: control-plane callers

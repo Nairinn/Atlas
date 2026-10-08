@@ -27,7 +27,7 @@ pub async fn run(
     let resp = client.deploy(&cfg).await?;
 
     if format == Format::Json {
-        println!("{}", serde_json::to_string_pretty(&resp)?);
+        super::print_json(serde_json::to_value(&resp)?, mock)?;
         return Ok(());
     }
 

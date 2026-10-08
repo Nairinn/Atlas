@@ -16,7 +16,7 @@ pub struct Config {
     pub database_pool_size: u32,
 
     /// gRPC addresses probed by `GET /projects/:name/status`, in
-    /// `host:port` form (no scheme — these are dialled as HTTP/2 origins).
+    /// `host:port` form, no scheme: these are dialled as HTTP/2 origins.
     pub auth_addr: String,
     pub geo_addr: String,
     pub payments_addr: String,
@@ -68,6 +68,8 @@ impl Config {
             rate_limit: crate::ratelimit::RateLimitConfig {
                 default_per_minute: parse_u32("RATE_LIMIT_PER_MINUTE", 120),
                 signup_per_minute: parse_u32("RATE_LIMIT_SIGNUP_PER_MINUTE", 3),
+                // Per-address ceiling; see ratelimit.rs for why it exists.
+                ip_ceiling_per_minute: parse_u32("RATE_LIMIT_IP_CEILING_PER_MINUTE", 1200),
                 // 0 = trust nothing in X-Forwarded-For. Behind the
                 // ingress-nginx in infra/k8s this is 1.
                 trusted_proxy_hops: parse_u32("TRUSTED_PROXY_HOPS", 0) as usize,
@@ -83,11 +85,17 @@ impl Config {
     }
 }
 
+/// Parse an integer env var, failing at startup on garbage rather than
+/// falling back: a typo'd value must stop the deploy, not quietly run
+/// with config the operator believes they set.
 fn parse_u32(var: &str, default: u32) -> u32 {
-    env::var(var)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match env::var(var) {
+        Ok(v) => v
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{var} must be an integer, got {v:?}")),
+        Err(_) => default,
+    }
 }
 
 fn parse_addr(var: &str, default: &str) -> SocketAddr {

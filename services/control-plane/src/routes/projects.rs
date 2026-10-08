@@ -99,6 +99,7 @@ async fn deploy(
 ) -> Result<Json<DeployResponse>, ApiError> {
     let started = Instant::now();
 
+    key.require_admin()?;
     validate_project_name(&body.name)?;
     if !KNOWN_REGIONS.contains(&body.region.as_str()) {
         return Err(ApiError::BadRequest(format!(
@@ -174,7 +175,10 @@ async fn deploy(
                     "this key is scoped to a single project and cannot create new ones".into(),
                 ));
             }
-            let id: Uuid = sqlx::query_scalar(
+            // A concurrent deploy of the same name races this INSERT;
+            // the unique violation is a name collision, not a fault, and
+            // surfacing it as 500 would page somebody for a race.
+            let id: Uuid = match sqlx::query_scalar(
                 r#"
                 INSERT INTO control.projects (account_id, name, region, environment, endpoint)
                 VALUES ($1, $2, $3, $4, $5)
@@ -187,7 +191,17 @@ async fn deploy(
             .bind(&body.environment)
             .bind(&endpoint)
             .fetch_one(&mut *tx)
-            .await?;
+            .await
+            {
+                Ok(id) => id,
+                Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                    return Err(ApiError::Conflict(format!(
+                        "project name '{}' is already taken",
+                        body.name
+                    )));
+                }
+                Err(e) => return Err(e.into()),
+            };
             (id, true)
         }
     };
@@ -330,13 +344,17 @@ async fn project_status(
                 "payments" => payments_up,
                 _ => events_up,
             };
-            let u = usage.get(service).copied().unwrap_or_default();
+            // Gateway metrics carry no project label: the counters are
+            // platform-wide, so reporting them as this project's traffic
+            // would be a wrong number that looks exact. Null until the
+            // gateway labels by tenant; health still means something.
+            let _ = usage.get(service).copied().unwrap_or_default();
             ServiceStatus {
                 name: service.to_string(),
                 healthy,
-                p95_latency_ms: u.p95_ms.round().max(0.0) as u32,
-                requests_24h: u.requests,
-                error_rate: u.error_rate(),
+                p95_latency_ms: None,
+                requests_24h: None,
+                error_rate: None,
             }
         })
         .collect();
@@ -344,6 +362,7 @@ async fn project_status(
     Ok(Json(StatusResponse {
         project_name: project.name,
         services,
+        scope: "platform".to_string(),
     }))
 }
 

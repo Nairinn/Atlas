@@ -2,15 +2,13 @@
 //!
 //! The control plane is the backend the dashboard and CLI both talk to:
 //! it provisions projects, manages API keys, exposes usage stats, and
-//! streams logs. It will be built in a later phase.
+//! streams logs.
 //!
-//! Until it exists, every method here has two implementations:
-//!   - `real`: talks to whatever URL the CLI was configured with
-//!   - `mock`: returns deterministic in-memory responses
-//!
-//! Selection is controlled by the `--mock` flag on the CLI (default on
-//! while the control plane is not yet built). This lets us exercise the
-//! whole CLI surface end to end without a running backend.
+//! Every method has two implementations:
+//!   - `real`: talks to the configured control-plane URL (the default)
+//!   - `mock`: returns deterministic in-memory responses, selected with
+//!     `--mock` or `ATLAS_MOCK=1` so the whole CLI surface can be
+//!     exercised without a backend — and without touching anything real.
 
 use crate::config::AtlasConfig;
 use anyhow::{anyhow, Result};
@@ -111,13 +109,30 @@ impl ApiClient {
     // The mock returns a fixed-size vector so the CLI can render output
     // without holding a stream open.
 
-    pub async fn logs(&self, project_name: &str, service: Option<&str>) -> Result<Vec<LogLine>> {
+    pub async fn logs(
+        &self,
+        project_name: &str,
+        service: Option<&str>,
+        since: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<LogLine>> {
         match &self.transport {
             Transport::Mock => Ok(LogLine::mock_stream(service)),
             Transport::Http { base_url } => {
                 let mut url = format!("{}/projects/{}/logs", base_url, project_name);
+                let mut query: Vec<String> = Vec::new();
                 if let Some(svc) = service {
-                    url.push_str(&format!("?service={}", svc));
+                    query.push(format!("service={svc}"));
+                }
+                if let Some(s) = since {
+                    query.push(format!("since={}", urlencode(s)));
+                }
+                if let Some(n) = limit {
+                    query.push(format!("limit={n}"));
+                }
+                if !query.is_empty() {
+                    url.push('?');
+                    url.push_str(&query.join("&"));
                 }
                 let resp = self.http.get(url).bearer_auth(&self.api_key).send().await?;
                 let status = resp.status();
@@ -153,6 +168,7 @@ impl ApiClient {
         project_name: &str,
         name: &str,
         expiry: KeyExpiry,
+        scope: Option<&str>,
     ) -> Result<ApiKey> {
         match &self.transport {
             Transport::Mock => Ok(ApiKey::mock_create(name, expiry)),
@@ -161,6 +177,7 @@ impl ApiClient {
                 let body = CreateKeyRequest {
                     name: name.to_string(),
                     expiry,
+                    scope: scope.map(str::to_string),
                 };
                 let resp = self
                     .http
@@ -303,9 +320,11 @@ pub struct StatusResponse {
 pub struct ServiceStatus {
     pub name: String,
     pub healthy: bool,
-    pub p95_latency_ms: u32,
-    pub requests_24h: u64,
-    pub error_rate: f64,
+    /// Usage fields are null until gateway metrics are labelled by
+    /// project: the platform-wide counters mix every tenant's traffic.
+    pub p95_latency_ms: Option<u32>,
+    pub requests_24h: Option<u64>,
+    pub error_rate: Option<f64>,
 }
 
 impl StatusResponse {
@@ -316,30 +335,30 @@ impl StatusResponse {
                 ServiceStatus {
                     name: "auth".into(),
                     healthy: true,
-                    p95_latency_ms: 28,
-                    requests_24h: 14_203,
-                    error_rate: 0.0002,
+                    p95_latency_ms: Some(28),
+                    requests_24h: Some(14_203),
+                    error_rate: Some(0.0002),
                 },
                 ServiceStatus {
                     name: "geo".into(),
                     healthy: true,
-                    p95_latency_ms: 41,
-                    requests_24h: 88_417,
-                    error_rate: 0.0009,
+                    p95_latency_ms: Some(41),
+                    requests_24h: Some(88_417),
+                    error_rate: Some(0.0009),
                 },
                 ServiceStatus {
                     name: "payments".into(),
                     healthy: true,
-                    p95_latency_ms: 63,
-                    requests_24h: 2_104,
-                    error_rate: 0.0,
+                    p95_latency_ms: Some(63),
+                    requests_24h: Some(2_104),
+                    error_rate: Some(0.0),
                 },
                 ServiceStatus {
                     name: "events".into(),
                     healthy: true,
-                    p95_latency_ms: 12,
-                    requests_24h: 412_338,
-                    error_rate: 0.0,
+                    p95_latency_ms: Some(12),
+                    requests_24h: Some(412_338),
+                    error_rate: Some(0.0),
                 },
             ],
         }
@@ -408,6 +427,8 @@ pub struct ApiKey {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub status: String, // "active" | "revoked"
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -439,6 +460,8 @@ impl std::str::FromStr for KeyExpiry {
 struct CreateKeyRequest {
     name: String,
     expiry: KeyExpiry,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
 }
 
 impl ApiKey {
@@ -450,6 +473,7 @@ impl ApiKey {
                 created_at: "2026-04-12T09:14:33Z".into(),
                 last_used_at: Some("2026-05-26T15:41:02Z".into()),
                 status: "active".into(),
+                scope: Some("admin".into()),
             },
             ApiKey {
                 name: "ci".into(),
@@ -457,6 +481,7 @@ impl ApiKey {
                 created_at: "2026-04-20T11:02:18Z".into(),
                 last_used_at: Some("2026-05-26T14:28:55Z".into()),
                 status: "active".into(),
+                scope: Some("data".into()),
             },
             ApiKey {
                 name: "old-dev-key".into(),
@@ -464,6 +489,7 @@ impl ApiKey {
                 created_at: "2026-01-05T08:00:00Z".into(),
                 last_used_at: None,
                 status: "revoked".into(),
+                scope: Some("data".into()),
             },
         ]
     }
@@ -475,6 +501,22 @@ impl ApiKey {
             created_at: "2026-05-26T15:42:30Z".into(),
             last_used_at: None,
             status: "active".into(),
+            scope: Some("data".into()),
         }
     }
+}
+
+/// Percent-encode a query value. `since` is an RFC 3339 timestamp with
+/// colons and pluses; leaving them raw would produce an unparseable query.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }

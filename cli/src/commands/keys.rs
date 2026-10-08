@@ -3,7 +3,7 @@
 use crate::api::{ApiClient, KeyExpiry};
 use crate::commands::Format;
 use crate::config::AtlasConfig;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;
 use std::path::Path;
@@ -19,6 +19,10 @@ pub enum KeysCommand {
         /// Key expiry. One of: never | 30d | 90d | 1y.
         #[arg(long, default_value = "never")]
         expiry: String,
+        /// 'data' (gateway only) or 'admin' (also control-plane
+        /// mutations). Defaults to data, the smaller grant.
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Revoke an existing key by its prefix.
     Revoke {
@@ -38,27 +42,37 @@ pub async fn run(
     let client = ApiClient::from_config(&cfg, mock, base_url);
 
     match cmd {
-        KeysCommand::List => list(&client, &cfg, format).await,
-        KeysCommand::Create { name, expiry } => {
+        KeysCommand::List => list(&client, &cfg, format, mock).await,
+        KeysCommand::Create {
+            name,
+            expiry,
+            scope,
+        } => {
             let exp: KeyExpiry = expiry.parse()?;
-            create(&client, &cfg, &name, exp, format).await
+            let scope = match scope.as_deref().map(str::trim) {
+                None | Some("") => "data",
+                Some("data") | Some("admin") => scope.as_deref().unwrap_or("data"),
+                Some(other) => return Err(anyhow!("unknown scope '{other}': known: data, admin")),
+            };
+            create(&client, &cfg, &name, exp, format, mock, scope).await
         }
-        KeysCommand::Revoke { prefix } => revoke(&client, &cfg, &prefix, format).await,
+        KeysCommand::Revoke { prefix } => revoke(&client, &cfg, &prefix, format, mock).await,
     }
 }
 
-async fn list(client: &ApiClient, cfg: &AtlasConfig, format: Format) -> Result<()> {
+async fn list(client: &ApiClient, cfg: &AtlasConfig, format: Format, mock: bool) -> Result<()> {
     let keys = client.list_keys(&cfg.project.name).await?;
     if format == Format::Json {
-        println!("{}", serde_json::to_string_pretty(&keys)?);
+        super::print_json(serde_json::to_value(&keys)?, mock)?;
         return Ok(());
     }
     println!(
-        "{:<14} {:<22} {:<22} {:<22} {}",
+        "{:<14} {:<22} {:<22} {:<22} {:<8} {}",
         "NAME".dimmed(),
         "PREFIX".dimmed(),
         "CREATED".dimmed(),
         "LAST USED".dimmed(),
+        "SCOPE".dimmed(),
         "STATUS".dimmed()
     );
     for k in &keys {
@@ -68,11 +82,12 @@ async fn list(client: &ApiClient, cfg: &AtlasConfig, format: Format) -> Result<(
             other => other.to_string(),
         };
         println!(
-            "{:<14} {:<22} {:<22} {:<22} {}",
+            "{:<14} {:<22} {:<22} {:<22} {:<8} {}",
             k.name,
             k.prefix,
             k.created_at,
             k.last_used_at.as_deref().unwrap_or("—"),
+            k.scope.as_deref().unwrap_or("data"),
             status_cell
         );
     }
@@ -85,17 +100,22 @@ async fn create(
     name: &str,
     expiry: KeyExpiry,
     format: Format,
+    mock: bool,
+    scope: &str,
 ) -> Result<()> {
-    let key = client.create_key(&cfg.project.name, name, expiry).await?;
+    let key = client
+        .create_key(&cfg.project.name, name, expiry, Some(scope))
+        .await?;
     if format == Format::Json {
-        println!("{}", serde_json::to_string_pretty(&key)?);
+        super::print_json(serde_json::to_value(&key)?, mock)?;
         return Ok(());
     }
     println!(
-        "{} created key '{}' ({})",
+        "{} created key '{}' ({}, scope {})",
         "✓".green(),
         key.name.bold(),
-        key.prefix.cyan()
+        key.prefix.cyan(),
+        key.scope.as_deref().unwrap_or("data").yellow()
     );
     println!(
         "{}",
@@ -104,10 +124,16 @@ async fn create(
     Ok(())
 }
 
-async fn revoke(client: &ApiClient, cfg: &AtlasConfig, prefix: &str, format: Format) -> Result<()> {
+async fn revoke(
+    client: &ApiClient,
+    cfg: &AtlasConfig,
+    prefix: &str,
+    format: Format,
+    mock: bool,
+) -> Result<()> {
     client.revoke_key(&cfg.project.name, prefix).await?;
     if format == Format::Json {
-        println!("{}", serde_json::json!({"ok": true, "revoked": prefix}));
+        super::print_json(serde_json::json!({"ok": true, "revoked": prefix}), mock)?;
         return Ok(());
     }
     println!("{} revoked key {}", "✓".green(), prefix.cyan());

@@ -55,7 +55,7 @@ use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Embedded at compile time from the repo's single source of schema truth.
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
@@ -216,9 +216,31 @@ async fn status(pool: &PgPool, check: bool) -> Result<()> {
         info!("no migrations recorded — this database has never been migrated");
     }
 
+    // Load checksums for the drift check: `--check` exists so the k8s
+    // init container fails when the schema is wrong, and "applied but
+    // edited" is wrong in the worst way — it looks up to date.
+    let rows: Vec<(i64, Vec<u8>)> = if applied.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await?
+    };
+
     let mut pending = 0;
+    let mut drifted: Vec<i64> = Vec::new();
     for m in MIGRATOR.iter() {
         let state = if applied.contains(&m.version) {
+            if let Some((_, checksum)) = rows.iter().find(|(v, _)| *v == m.version) {
+                if checksum.as_slice() != m.checksum.as_ref() {
+                    drifted.push(m.version);
+                    println!(
+                        "{:>6}  {:<10} {}  [CHECKSUM MISMATCH: file changed after being applied]",
+                        m.version, "DRIFTED", m.description
+                    );
+                    continue;
+                }
+            }
             "applied"
         } else {
             pending += 1;
@@ -241,12 +263,29 @@ async fn status(pool: &PgPool, check: bool) -> Result<()> {
         }
     }
 
+    let mut failed = false;
     if pending > 0 {
         info!(pending, "migrations pending");
         if check {
             bail!("{pending} migration(s) pending");
         }
-    } else {
+    }
+    if !drifted.is_empty() {
+        for v in &drifted {
+            error!(
+                version = v,
+                "applied migration was edited after being applied"
+            );
+        }
+        if check {
+            bail!(
+                "{} applied migration(s) have checksum mismatches — the recorded schema no                  longer matches the files. Restore the original file contents.",
+                drifted.len()
+            );
+        }
+        failed = true;
+    }
+    if !failed && pending == 0 && drifted.is_empty() {
         info!("database is up to date");
     }
     Ok(())
@@ -278,6 +317,11 @@ async fn baseline(pool: &PgPool, through: i64) -> Result<()> {
         );
     }
 
+    // One transaction: a baseline that dies halfway must not leave a
+    // partial history, or the operator's mental model of "recorded
+    // through N" is wrong and the next `run` will try to apply migrations
+    // the schema already has.
+    let mut tx = pool.begin().await?;
     // Create the history table by running the migrator against a schema it
     // will find fully applied... it cannot know that, so write the rows
     // directly. This mirrors sqlx's own table definition.
@@ -293,7 +337,7 @@ async fn baseline(pool: &PgPool, through: i64) -> Result<()> {
         )
         "#,
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     let mut count = 0;
@@ -308,10 +352,11 @@ async fn baseline(pool: &PgPool, through: i64) -> Result<()> {
         .bind(m.version)
         .bind(m.description.as_ref())
         .bind(m.checksum.as_ref())
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
         count += 1;
     }
+    tx.commit().await?;
 
     let still_pending = MIGRATOR.iter().filter(|m| m.version > through).count();
     warn!(

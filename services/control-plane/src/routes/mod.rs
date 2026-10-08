@@ -19,38 +19,40 @@ use crate::state::AppState;
 use std::sync::Arc;
 
 /// Router for production, where the listener supplies a peer address.
-///
-/// Rate limiting sits outside the metrics layer so a throttled request is
-/// still counted: a spike of 429s on /v1/accounts is the signal that
-/// someone is trying to mass-create accounts.
 pub fn router(state: AppState, limiters: Arc<Limiters>) -> Router {
-    base_router(state).layer(middleware::from_fn_with_state(
-        Arc::clone(&limiters),
-        ratelimit::layer,
-    ))
+    base_router(state, Arc::clone(&limiters), true)
 }
 
 /// Router for tests and any listener without `ConnectInfo`.
 pub fn router_without_peer(state: AppState, limiters: Arc<Limiters>) -> Router {
-    base_router(state).layer(middleware::from_fn_with_state(
-        Arc::clone(&limiters),
-        ratelimit::layer_without_peer,
-    ))
+    base_router(state, limiters, false)
 }
 
-fn base_router(state: AppState) -> Router {
+fn base_router(state: AppState, limiters: Arc<Limiters>, with_peer: bool) -> Router {
     let v1 = Router::new()
         .merge(accounts::routes())
         .merge(projects::routes())
         .merge(keys::routes())
         .merge(logs::routes());
 
-    Router::new()
+    // Metrics wraps the limiter so a 429 is counted: a spike of them on
+    // /v1/accounts is the signal that someone is trying to mass-create
+    // accounts, and a limiter that hides its own effect is untuneable.
+    let base = Router::new()
         .merge(ops::routes())
         .nest("/v1", v1)
         .layer(middleware::from_fn(track))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http());
+    if with_peer {
+        base.layer(middleware::from_fn_with_state(limiters, ratelimit::layer))
+            .with_state(state)
+    } else {
+        base.layer(middleware::from_fn_with_state(
+            limiters,
+            ratelimit::layer_without_peer,
+        ))
         .with_state(state)
+    }
 }
 
 /// Request counter and latency histogram, labelled by matched route.

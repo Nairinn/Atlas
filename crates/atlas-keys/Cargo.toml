@@ -8,3 +8,6 @@ license = "MIT"
 [dependencies]
 sha2 = { workspace = true }
 uuid = { workspace = true }
+# The key secret is raw OS entropy; getrandom is the same source
+# uuid::Uuid::new_v4 draws from, without the UUID's 6 reserved bits.
+getrandom = "0.2"

@@ -18,7 +18,7 @@ pub async fn run(
     let resp = client.status(&cfg.project.name).await?;
 
     if format == Format::Json {
-        println!("{}", serde_json::to_string_pretty(&resp)?);
+        super::print_json(serde_json::to_value(&resp)?, mock)?;
         return Ok(());
     }
 
@@ -38,13 +38,23 @@ pub async fn run(
         } else {
             "DOWN".red().to_string()
         };
+        // Usage is null until gateway metrics are labelled per project;
+        // render the honest "—" rather than a zero that looks measured.
+        let p95 = s
+            .p95_latency_ms
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "—".into());
+        let reqs = s
+            .requests_24h
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "—".into());
+        let err = s
+            .error_rate
+            .map(|v| format!("{v:.3}%"))
+            .unwrap_or_else(|| "—".into());
         println!(
-            "{:<10} {:<8} {:>10} {:>14} {:>11.3}%",
-            s.name,
-            status_cell,
-            s.p95_latency_ms,
-            s.requests_24h,
-            s.error_rate * 100.0
+            "{:<10} {:<8} {:>10} {:>14} {:>11}",
+            s.name, status_cell, p95, reqs, err
         );
     }
     Ok(())

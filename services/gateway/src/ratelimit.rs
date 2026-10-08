@@ -52,6 +52,12 @@ pub struct RateLimitConfig {
     /// Requests per minute for credential endpoints (login, register).
     /// Much lower: these are the ones worth brute forcing.
     pub auth_per_minute: u32,
+    /// Per-address requests per minute, applied to EVERY non-exempt request
+    /// in addition to the primary bucket. This is the anti-rotation cap:
+    /// without it a client minting a fresh bearer string per request gets
+    /// a fresh token bucket each time. Set high enough that carrier-grade
+    /// NAT users never hit it in normal traffic.
+    pub ip_ceiling_per_minute: u32,
     /// How many proxies sit in front of this service. See [`client_key`].
     pub trusted_proxy_hops: usize,
     pub enabled: bool,
@@ -67,6 +73,10 @@ impl Default for RateLimitConfig {
             // Ten credential attempts a minute is far above what a human
             // needs and far below what a password-guessing run wants.
             auth_per_minute: 10,
+            // Ten per second from one address sustained is not normal
+            // client behaviour even behind CGNAT; an attacker rotating
+            // bogus tokens hits it immediately.
+            ip_ceiling_per_minute: 6000,
             trusted_proxy_hops: 0,
             enabled: true,
         }
@@ -76,6 +86,11 @@ impl Default for RateLimitConfig {
 pub struct Limiters {
     default: Keyed,
     auth: Keyed,
+    /// A per-address cap that applies even to authenticated traffic, so a
+    /// client rotating garbage bearer tokens cannot mint a fresh bucket per
+    /// request from one address. Set far above the per-token quota so
+    /// carrier-grade NAT users never feel it; only the rotation attack does.
+    ip_ceiling: Keyed,
     config: RateLimitConfig,
 }
 
@@ -91,6 +106,7 @@ impl Limiters {
         Arc::new(Self {
             default: RateLimiter::keyed(quota(config.default_per_minute)),
             auth: RateLimiter::keyed(quota(config.auth_per_minute)),
+            ip_ceiling: RateLimiter::keyed(quota(config.ip_ceiling_per_minute)),
             config,
         })
     }
@@ -103,6 +119,7 @@ impl Limiters {
     pub fn retain_recent(&self) {
         self.default.retain_recent();
         self.auth.retain_recent();
+        self.ip_ceiling.retain_recent();
     }
 
     /// Spawn the periodic sweep. Cheap: it walks only live keys.
@@ -247,6 +264,24 @@ async fn check(
         return next.run(req).await;
     }
     let credential = is_credential_path(&path);
+
+    // The per-address ceiling applies to every non-exempt request. It is
+    // checked second: the primary bucket names the abuser better (scope
+    // label), but the ceiling is what actually caps a token-rotation
+    // attack, which otherwise mints a fresh primary bucket per request.
+    let ip_key = format!(
+        "ip:{}",
+        client_key(req.headers(), peer, limiters.config.trusted_proxy_hops)
+    );
+    if let Err(negative) = limiters.ip_ceiling.check_key(&ip_key) {
+        let wait = negative.wait_time_from(DefaultClock::default().now());
+        metrics::counter!(
+            "atlas_gateway_rate_limited_total",
+            "scope" => "ip_ceiling",
+        )
+        .increment(1);
+        return too_many_requests(wait);
+    }
 
     // Credential endpoints are keyed by address even when a token is
     // present: the point is to limit guessing at *other people's*
@@ -406,6 +441,7 @@ mod tests {
     #[test]
     fn the_strict_quota_actually_stops_at_the_limit() {
         let limiters = Limiters::new(RateLimitConfig {
+            ip_ceiling_per_minute: 6000,
             auth_per_minute: 3,
             ..RateLimitConfig::default()
         });
@@ -432,6 +468,7 @@ mod tests {
         let limiters = Limiters::new(RateLimitConfig {
             auth_per_minute: 1,
             default_per_minute: 100,
+            ip_ceiling_per_minute: 6000,
             ..RateLimitConfig::default()
         });
         let key = "ip:198.51.100.3".to_string();
@@ -466,5 +503,36 @@ mod tests {
         let limiters = Limiters::new(RateLimitConfig::default());
         limiters.retain_recent();
         let _ = DefaultClock::default().now();
+    }
+
+    /// The rotation attack the ceiling exists for: a fresh bearer string
+    /// per request used to mean a fresh token bucket per request, so N
+    /// garbage tokens from one address were unlimited. The ceiling caps
+    /// the ADDRESS, which the attacker cannot rotate without the network
+    /// cost of actually doing so.
+    #[test]
+    fn token_rotation_from_one_address_still_hits_the_ceiling() {
+        let limiters = Limiters::new(RateLimitConfig {
+            ip_ceiling_per_minute: 5,
+            ..RateLimitConfig::default()
+        });
+        let ip_key = "ip:203.0.113.9".to_string();
+        // Five rotating bearers: each gets a distinct token bucket, so
+        // the default limiter never complains — but the ceiling does.
+        for i in 0..5 {
+            let headers = headers(&[("authorization", &format!("Bearer garbage-token-{i}"))]);
+            let token = token_key(&headers).unwrap();
+            assert!(limiters.default.check_key(&token).is_ok());
+            assert!(limiters.ip_ceiling.check_key(&ip_key).is_ok());
+        }
+        // The sixth, with yet another fresh token, is refused by the
+        // ceiling even though its token bucket is brand new.
+        let headers = headers(&[("authorization", "Bearer garbage-token-6")]);
+        let token = token_key(&headers).unwrap();
+        assert!(limiters.default.check_key(&token).is_ok());
+        assert!(
+            limiters.ip_ceiling.check_key(&ip_key).is_err(),
+            "the ceiling, not the token bucket, must stop rotation"
+        );
     }
 }

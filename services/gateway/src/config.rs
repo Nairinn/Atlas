@@ -62,6 +62,9 @@ impl Config {
             rate_limit: crate::ratelimit::RateLimitConfig {
                 default_per_minute: parse_u32("RATE_LIMIT_PER_MINUTE", 600),
                 auth_per_minute: parse_u32("RATE_LIMIT_AUTH_PER_MINUTE", 10),
+                // The per-address ceiling; see ratelimit.rs for why it
+                // exists. High default: CGNAT users must not feel it.
+                ip_ceiling_per_minute: parse_u32("RATE_LIMIT_IP_CEILING_PER_MINUTE", 6000),
                 // Defaults to 0: trust nothing in X-Forwarded-For unless the
                 // operator states how many proxies actually sit in front.
                 // Behind the ingress-nginx in infra/k8s this is 1.
@@ -81,18 +84,32 @@ fn parse_addr(var: &str, default: &str) -> SocketAddr {
         .unwrap_or_else(|_| panic!("{var} must be a valid socket address"))
 }
 
+/// Parse a required-integer env var, failing at startup on garbage.
+///
+/// Falling back to the default on a malformed value would silently run
+/// with config the operator believes they set: a typo like
+/// `RATE_LIMIT_PER_MINUTE=6OO` (letter O) must stop the deploy, not
+/// quietly run at 600.
 fn parse_u32(var: &str, default: u32) -> u32 {
-    env::var(var)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match env::var(var) {
+        Ok(v) => v
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{var} must be an integer, got {v:?}")),
+        Err(_) => default,
+    }
 }
 
 fn parse_secs(var: &str, default: u64) -> Duration {
-    Duration::from_secs(
-        env::var(var)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(default),
-    )
+    Duration::from_secs(parse_u64(var, default))
+}
+
+fn parse_u64(var: &str, default: u64) -> u64 {
+    match env::var(var) {
+        Ok(v) => v
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{var} must be an integer, got {v:?}")),
+        Err(_) => default,
+    }
 }

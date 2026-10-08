@@ -32,13 +32,13 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Hit the real control plane over HTTP. Defaults off while the
-    /// control plane is not yet built — without `--live`, every command
-    /// uses deterministic in-memory mock responses.
+    /// Use deterministic in-memory responses instead of the control
+    /// plane. Opt-in: the safe default is to touch nothing, so exploring
+    /// the CLI must be a deliberate choice. Also set by ATLAS_MOCK=1.
     #[arg(long, global = true)]
-    live: bool,
+    mock: bool,
 
-    /// Override the control plane base URL. Only used with `--live`.
+    /// Override the control plane base URL.
     #[arg(long, global = true)]
     base_url: Option<String>,
 
@@ -56,14 +56,36 @@ enum Command {
     Status,
     /// Tail logs for one or all services.
     Logs {
-        /// Service to filter by: auth | geo | payments | events. Omit for all.
+        /// Service to filter by: auth | geo | payments | events |
+        /// control-plane. Omit for all.
         service: Option<String>,
+        /// Only rows at or after this RFC 3339 timestamp.
+        #[arg(long)]
+        since: Option<String>,
+        /// At most this many rows (newest first, then reversed for
+        /// display). The server caps at 200.
+        #[arg(long)]
+        limit: Option<u32>,
     },
     /// Manage API keys for this project.
     Keys {
         #[command(subcommand)]
         action: commands::keys::KeysCommand,
     },
+}
+
+/// Mock when the flag is passed or ATLAS_MOCK is set; live otherwise.
+/// In mock mode every command prints a notice so output is never mistaken
+/// for a real deployment's.
+fn use_mock(cli: &Cli) -> bool {
+    let on = cli.mock
+        || std::env::var("ATLAS_MOCK")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+    if on {
+        eprintln!("[MOCK — nothing was changed]");
+    }
+    on
 }
 
 #[tokio::main]
@@ -74,20 +96,31 @@ async fn main() -> ExitCode {
     } else {
         Format::Human
     };
+    // Computed once: the match arms move fields out of `cli`.
+    let mock = use_mock(&cli);
 
     let result: Result<()> = match cli.command {
         Command::Validate => commands::validate::run(&cli.config, format),
-        Command::Deploy => {
-            commands::deploy::run(&cli.config, format, !cli.live, cli.base_url).await
-        }
-        Command::Status => {
-            commands::status::run(&cli.config, format, !cli.live, cli.base_url).await
-        }
-        Command::Logs { service } => {
-            commands::logs::run(&cli.config, service, format, !cli.live, cli.base_url).await
+        Command::Deploy => commands::deploy::run(&cli.config, format, mock, cli.base_url).await,
+        Command::Status => commands::status::run(&cli.config, format, mock, cli.base_url).await,
+        Command::Logs {
+            service,
+            since,
+            limit,
+        } => {
+            commands::logs::run(
+                &cli.config,
+                service,
+                format,
+                mock,
+                cli.base_url,
+                since,
+                limit,
+            )
+            .await
         }
         Command::Keys { action } => {
-            commands::keys::run(&cli.config, action, format, !cli.live, cli.base_url).await
+            commands::keys::run(&cli.config, action, format, mock, cli.base_url).await
         }
     };
 

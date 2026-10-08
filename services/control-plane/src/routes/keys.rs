@@ -32,7 +32,14 @@ pub fn routes() -> Router<AppState> {
         .route("/projects/:name/keys/:prefix", delete(revoke_key))
 }
 
-type KeyRow = (String, String, DateTime<Utc>, Option<DateTime<Utc>>, String);
+type KeyRow = (
+    String,
+    String,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    String,
+    String,
+);
 
 fn to_view(row: KeyRow) -> ApiKeyView {
     ApiKeyView {
@@ -41,6 +48,7 @@ fn to_view(row: KeyRow) -> ApiKeyView {
         created_at: rfc3339(row.2),
         last_used_at: row.3.map(rfc3339),
         status: row.4,
+        scope: row.5,
     }
 }
 
@@ -49,11 +57,12 @@ async fn list_keys(
     key: AuthedKey,
     Path(name): Path<String>,
 ) -> Result<Json<Vec<ApiKeyView>>, ApiError> {
+    key.require_admin()?;
     let project = resolve_project(&state, &key, &name).await?;
 
     let rows: Vec<KeyRow> = sqlx::query_as(
         r#"
-        SELECT name, key_prefix, created_at, last_used_at, status
+        SELECT name, key_prefix, created_at, last_used_at, status, scope
         FROM control.api_keys
         WHERE project_id = $1
         ORDER BY created_at ASC
@@ -72,6 +81,7 @@ async fn create_key(
     Path(name): Path<String>,
     Json(body): Json<CreateKeyRequest>,
 ) -> Result<(StatusCode, Json<CreatedKeyResponse>), ApiError> {
+    key.require_admin()?;
     let project = resolve_project(&state, &key, &name).await?;
 
     let key_name = body.name.trim().to_string();
@@ -84,16 +94,47 @@ async fn create_key(
         ));
     }
 
+    // Scope: absent or 'data' = gateway only; 'admin' also allows
+    // control-plane mutations. Anything else is rejected rather than
+    // guessed.
+    let scope = match body.scope.as_deref().map(str::trim) {
+        None | Some("") | Some("data") => "data",
+        Some("admin") => "admin",
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "unknown scope '{other}': known: data, admin"
+            )))
+        }
+    };
+
     // Tier follows the project's environment, so a production project
-    // mints `atl_live_` keys and a dev project mints `atl_dev_`.
-    let generated = keygen::generate(&project.environment);
+    // mints `atl_live_` keys and a dev project mints `atl_dev_` keys.
+    // Re-roll while the 4-char prefix collides with one of the project's
+    // ACTIVE keys: a duplicate makes one key unrevokable by prefix, so it
+    // is cheaper to roll again than to disambiguate later.
+    let taken: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT key_prefix FROM control.api_keys
+        WHERE project_id = $1 AND status = 'active'
+        "#,
+    )
+    .bind(project.id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut generated = keygen::generate(&project.environment);
+    while taken.contains(&generated.prefix) {
+        generated = keygen::generate(&project.environment);
+    }
     let expires_at = body.expiry.days().map(|d| Utc::now() + Duration::days(d));
 
+    // Key + audit in ONE transaction: an audit trail that can miss the
+    // event it exists to record is not an audit trail.
+    let mut tx = state.pool.begin().await?;
     let created_at: DateTime<Utc> = sqlx::query_scalar(
         r#"
         INSERT INTO control.api_keys
-            (account_id, project_id, name, key_prefix, key_hash, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (account_id, project_id, name, key_prefix, key_hash, expires_at, scope)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING created_at
         "#,
     )
@@ -103,7 +144,8 @@ async fn create_key(
     .bind(&generated.prefix)
     .bind(&generated.hash)
     .bind(expires_at)
-    .fetch_one(&state.pool)
+    .bind(scope)
+    .fetch_one(&mut *tx)
     .await?;
 
     sqlx::query(
@@ -121,8 +163,9 @@ async fn create_key(
         generated.prefix,
         expires_at.map(rfc3339).unwrap_or_else(|| "never".into())
     ))
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     tracing::info!(project = %project.name, prefix = %generated.prefix, "api key created");
 
@@ -135,6 +178,7 @@ async fn create_key(
                 created_at: rfc3339(created_at),
                 last_used_at: None,
                 status: "active".to_string(),
+                scope: scope.to_string(),
             },
             api_key: generated.plaintext,
         }),
@@ -146,6 +190,7 @@ async fn revoke_key(
     key: AuthedKey,
     Path((name, prefix)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
+    key.require_admin()?;
     let project = resolve_project(&state, &key, &name).await?;
 
     // Match active keys only, so revoking twice is a clean 404 rather than
@@ -182,6 +227,7 @@ async fn revoke_key(
 
     let (key_id, key_prefix) = matches.into_iter().next().expect("exactly one match");
 
+    let mut tx = state.pool.begin().await?;
     sqlx::query(
         r#"
         UPDATE control.api_keys
@@ -190,7 +236,7 @@ async fn revoke_key(
         "#,
     )
     .bind(key_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query(
@@ -203,8 +249,9 @@ async fn revoke_key(
     .bind(key.account_id)
     .bind(&key.prefix)
     .bind(format!("revoked key {key_prefix}"))
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     tracing::info!(project = %project.name, prefix = %key_prefix, "api key revoked");
 

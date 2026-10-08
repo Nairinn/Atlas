@@ -47,6 +47,10 @@ pub fn routes() -> Router<AppState> {
 pub struct LogParams {
     /// `auth` | `geo` | `payments` | `events` | `control-plane`.
     pub service: Option<String>,
+    /// RFC 3339 lower bound on `created_at`.
+    pub since: Option<DateTime<Utc>>,
+    /// At most this many rows; capped at LOG_LIMIT.
+    pub limit: Option<i64>,
 }
 
 async fn project_logs(
@@ -57,9 +61,10 @@ async fn project_logs(
 ) -> Result<Json<Vec<LogLine>>, ApiError> {
     let project = resolve_project(&state, &key, &name).await?;
 
-    // Take the newest LOG_LIMIT rows, then flip to chronological order:
-    // logs read top-to-bottom oldest-first, but "most recent 200" is the
-    // window you want, not "first 200 ever".
+    // Take the newest N rows, then flip to chronological order: logs
+    // read top-to-bottom oldest-first, but "most recent N" is the window
+    // you want, not "first N ever".
+    let limit = params.limit.unwrap_or(LOG_LIMIT).clamp(1, LOG_LIMIT);
     let rows: Vec<(DateTime<Utc>, String, String, String)> = sqlx::query_as(
         r#"
         SELECT created_at, service, level, message
@@ -68,6 +73,7 @@ async fn project_logs(
             FROM control.audit_events
             WHERE project_id = $1
               AND ($2::text IS NULL OR service = $2)
+              AND ($4::timestamptz IS NULL OR created_at >= $4)
             ORDER BY created_at DESC
             LIMIT $3
         ) recent
@@ -76,7 +82,8 @@ async fn project_logs(
     )
     .bind(project.id)
     .bind(params.service.as_deref())
-    .bind(LOG_LIMIT)
+    .bind(limit)
+    .bind(params.since)
     .fetch_all(&state.pool)
     .await?;
 
