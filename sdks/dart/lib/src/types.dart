@@ -275,7 +275,8 @@ class Deposit {
 }
 
 class Transaction {
-  Transaction({required this.transactionId, required this.status, this.clientSecret});
+  Transaction(
+      {required this.transactionId, required this.status, this.clientSecret});
 
   factory Transaction.fromJson(Map<String, dynamic> json) => Transaction(
         transactionId: json['transaction_id'] as String,

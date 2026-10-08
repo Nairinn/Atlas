@@ -73,11 +73,32 @@ export interface AtlasClientOptions {
  */
 export class AtlasClient {
   private readonly http: Http;
-  private token: string | undefined;
+  readonly #projectKey: string;
+  #token: string | undefined;
 
   readonly auth: AuthApi;
   readonly geo: GeoApi;
   readonly payments: PaymentsApi;
+
+  /**
+   * Redacted in util.inspect, console.log, and JSON.stringify: the key
+   * and the token are the two things a debug log line must never carry
+   * into a log aggregator.
+     */
+  [Symbol.for('nodejs.util.inspect.custom')](): Record<string, unknown> {
+    return {
+      projectKey: '<redacted>',
+      token: this.#token === undefined ? undefined : '<redacted>',
+    };
+  }
+
+  /** Same redaction for JSON.stringify and structured loggers. */
+  toJSON(): Record<string, unknown> {
+    return {
+      projectKey: '<redacted>',
+      token: this.#token === undefined ? undefined : '<redacted>',
+    };
+  }
 
   constructor(opts: AtlasClientOptions) {
     if (!opts.projectKey) {
@@ -103,7 +124,8 @@ export class AtlasClient {
         'X-Atlas-Key': opts.projectKey,
       },
     });
-    this.token = opts.token;
+    this.#projectKey = opts.projectKey;
+    this.#token = opts.token;
 
     this.auth = new AuthApi(this.http, this);
     this.geo = new GeoApi(this.http, this);
@@ -112,12 +134,12 @@ export class AtlasClient {
 
   /** The current bearer token, if any. */
   getToken(): string | undefined {
-    return this.token;
+    return this.#token;
   }
 
   /** Set or clear the token. `login()` calls this; `logout()` clears it. */
   setToken(token: string | undefined): void {
-    this.token = token;
+    this.#token = token;
   }
 }
 

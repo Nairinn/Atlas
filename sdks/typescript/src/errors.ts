@@ -34,22 +34,37 @@ export class AtlasError extends Error {
   readonly status: number;
   /** Request path, for logging. Never includes the bearer token. */
   readonly path: string;
+  /**
+   * The Retry-After the server asked for, in milliseconds, when present
+   * and parseable. Capped so a hostile or buggy value cannot stall a
+   * caller indefinitely. The transport waits at least this long before
+   * retrying.
+   */
+  readonly retryAfterMs?: number;
 
   constructor(opts: {
     code: string;
     message: string;
     status: number;
     path: string;
+    retryAfterMs?: number | undefined;
   }) {
     super(opts.message);
     this.name = 'AtlasError';
     this.code = opts.code;
     this.status = opts.status;
     this.path = opts.path;
+    if (opts.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
   }
 
   /**
    * Whether retrying the identical request could plausibly succeed.
+   *
+   * The set is the retry contract across all three SDKs: unavailable,
+   * deadline_exceeded, resource_exhausted — the transient upstream
+   * states. A 500 internal is deliberately absent: it means the gateway
+   * itself is broken in a way a retry cannot fix, and retrying it hides
+   * the bug.
    *
    * Note this is about the *error*, not about the request: retrying a
    * non-idempotent POST is unsafe even when this returns true. The
@@ -59,8 +74,7 @@ export class AtlasError extends Error {
     return (
       this.code === 'unavailable' ||
       this.code === 'deadline_exceeded' ||
-      this.code === 'resource_exhausted' ||
-      this.status >= 500
+      this.code === 'resource_exhausted'
     );
   }
 }

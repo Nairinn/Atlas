@@ -42,6 +42,9 @@ class FakeGateway {
   int failTimes = 0;
   int attempts = 0;
 
+  /// Answer 429 + Retry-After this many times, for the rate-limit test.
+  int rateLimitedTimes = 0;
+
   String get baseUrl => 'http://127.0.0.1:${_server.port}';
 
   Future<void> close() => _server.close(force: true);
@@ -64,6 +67,18 @@ class FakeGateway {
       if (request.uri.path == '/v1/payments/wallet' ||
           request.uri.path == '/v1/payments/deposits') {
         final seen = attempts++;
+        if (seen < rateLimitedTimes) {
+          request.response.statusCode = 429;
+          request.response.headers.set('retry-after', '1');
+          request.response.write(jsonEncode({
+            'error': {
+              'code': 'resource_exhausted',
+              'message': 'rate limit exceeded'
+            }
+          }));
+          await request.response.close();
+          return;
+        }
         if (seen < failTimes) {
           request.response.statusCode = 503;
           request.response.write(jsonEncode({
@@ -240,6 +255,22 @@ void main() {
       final wallet = await c.payments.wallet();
       expect(wallet.balanceCents, 5000);
       expect(gateway.attempts, 3, reason: 'two failures, one success');
+      c.close();
+    });
+
+    test('a 429 with Retry-After delays the retry', () async {
+      gateway.rateLimitedTimes = 1;
+      final c = client(maxRetries: 1);
+      await c.auth.login(email: 'a@b.dev', password: 'hunter2!');
+
+      final started = DateTime.now();
+      final wallet = await c.payments.wallet();
+      final elapsedMs = DateTime.now().difference(started).inMilliseconds;
+
+      expect(wallet.balanceCents, 5000);
+      expect(gateway.requests.length, 3, reason: 'login + 429 + success');
+      expect(elapsedMs, greaterThanOrEqualTo(900),
+          reason: 'retry should honour Retry-After, took ${elapsedMs}ms');
       c.close();
     });
 

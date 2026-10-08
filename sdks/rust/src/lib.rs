@@ -316,13 +316,24 @@ pub struct GeoApi<'a> {
 
 impl GeoApi<'_> {
     /// Record the caller's position.
-    pub async fn update_location(&self, lat: f64, lng: f64) -> Result<Ack> {
+    ///
+    /// [`recorded_at`] is unix seconds for when the fix was taken, not
+    /// sent. The server clamps it to its retention window; without it the
+    /// server stamps arrival time, which for batched or offline uploads
+    /// would start the 24h retention clock late.
+    pub async fn update_location(
+        &self,
+        lat: f64,
+        lng: f64,
+        recorded_at: Option<i64>,
+    ) -> Result<Ack> {
+        let mut body = serde_json::json!({ "lat": lat, "lng": lng });
+        if let Some(at) = recorded_at {
+            body["recorded_at"] = serde_json::Value::from(at);
+        }
         self.client
             .http
-            .send(
-                Request::post("/v1/geo/locations")
-                    .json(serde_json::json!({ "lat": lat, "lng": lng })),
-            )
+            .send(Request::post("/v1/geo/locations").json(body))
             .await
     }
 

@@ -773,7 +773,7 @@ components:
                 - not_found
                 - already_exists
                 - failed_precondition
-                - rate_limited
+                - resource_exhausted
                 - unavailable
                 - internal
             message: { type: string }

@@ -23,6 +23,8 @@ struct Recorder {
     /// Fails this many times before succeeding, for the retry tests.
     fail_times: AtomicUsize,
     attempts: AtomicUsize,
+    /// Answers 429 + Retry-After this many times, for the rate-limit test.
+    rate_limited_times: AtomicUsize,
 }
 
 #[derive(Clone, Debug)]
@@ -181,9 +183,19 @@ async fn serve() -> (String, Shared) {
                 move |headers: HeaderMap| async move {
                     record(&s, &headers, "/v1/payments/wallet", String::new()).await;
                     let seen = s.attempts.fetch_add(1, Ordering::SeqCst);
+                    if seen < s.rate_limited_times.load(Ordering::SeqCst) {
+                        return (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "1")],
+                            Json(serde_json::json!({
+                                "error": {"code": "resource_exhausted", "message": "rate limit exceeded"}
+                            })),
+                        );
+                    }
                     if seen < s.fail_times.load(Ordering::SeqCst) {
                         return (
                             StatusCode::SERVICE_UNAVAILABLE,
+                            [("retry-after", "0")],
                             Json(serde_json::json!({
                                 "error": {"code": "unavailable", "message": "try again"}
                             })),
@@ -191,6 +203,7 @@ async fn serve() -> (String, Shared) {
                     }
                     (
                         StatusCode::OK,
+                        [("retry-after", "0")],
                         Json(serde_json::json!({"balance_cents": 5000, "currency": "USD"})),
                     )
                 }
@@ -494,4 +507,22 @@ async fn debug_output_never_contains_the_project_key() {
         !rendered.contains("tok-abc"),
         "token leaked from options: {rendered}"
     );
+}
+
+#[tokio::test]
+async fn a_429_with_retry_after_is_resource_exhausted_and_retryable() {
+    let (url, rec) = serve().await;
+    let c = client(&url, 1); // 1 retry
+
+    rec.rate_limited_times.store(1, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let wallet = c.payments().wallet().await.unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(wallet.balance_cents, 5000);
+    assert!(
+        elapsed >= std::time::Duration::from_millis(900),
+        "retry should honour Retry-After, took {elapsed:?}"
+    );
+    assert_eq!(rec.requests.lock().unwrap().len(), 2);
 }

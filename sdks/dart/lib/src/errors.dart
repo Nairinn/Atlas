@@ -9,7 +9,12 @@ enum AtlasErrorCode {
   notFound('not_found'),
   alreadyExists('already_exists'),
   failedPrecondition('failed_precondition'),
-  rateLimited('rate_limited'),
+
+  /// The 429 the gateway's own limiter emits.
+  resourceExhausted('resource_exhausted'),
+
+  /// The upstream took longer than its deadline.
+  deadlineExceeded('deadline_exceeded'),
   unavailable('unavailable'),
   internal('internal'),
 
@@ -38,18 +43,31 @@ class AtlasError implements Exception {
     required this.code,
     required this.message,
     required this.status,
+    this.retryAfterMs,
   });
 
   final AtlasErrorCode code;
   final String message;
   final int status;
 
+  /// The Retry-After the server asked for, in milliseconds, when present
+  /// and parseable. Capped so a hostile or buggy value cannot stall a
+  /// caller indefinitely. The transport waits at least this long before
+  /// retrying.
+  final int? retryAfterMs;
+
   /// Whether retrying the identical request might succeed.
+  ///
+  /// The set is the retry contract across all three SDKs: unavailable,
+  /// deadlineExceeded, resourceExhausted. Internal is deliberately
+  /// absent: retrying a broken gateway hides the bug.
   ///
   /// Says nothing about whether it is *safe* to retry — that depends on
   /// the request's idempotency, which the transport decides.
   bool get isRetryable =>
-      code == AtlasErrorCode.unavailable || code == AtlasErrorCode.rateLimited;
+      code == AtlasErrorCode.unavailable ||
+      code == AtlasErrorCode.deadlineExceeded ||
+      code == AtlasErrorCode.resourceExhausted;
 
   @override
   String toString() => 'AtlasError(${code.wire}, $status): $message';
@@ -71,4 +89,14 @@ class AtlasConnectionError implements Exception {
 
   @override
   String toString() => 'AtlasConnectionError: $message';
+}
+
+/// A 2xx whose body was not what this SDK expected.
+class AtlasDecodeError implements Exception {
+  AtlasDecodeError(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'AtlasDecodeError: $message';
 }

@@ -15,7 +15,10 @@ pub enum ErrorCode {
     NotFound,
     AlreadyExists,
     FailedPrecondition,
-    RateLimited,
+    /// The 429 the gateway's own limiter emits (`resource_exhausted`).
+    ResourceExhausted,
+    /// The upstream took longer than its deadline.
+    DeadlineExceeded,
     Unavailable,
     Internal,
     /// A code this SDK version does not know.
@@ -36,7 +39,8 @@ impl ErrorCode {
             "not_found" => Self::NotFound,
             "already_exists" => Self::AlreadyExists,
             "failed_precondition" => Self::FailedPrecondition,
-            "rate_limited" => Self::RateLimited,
+            "resource_exhausted" => Self::ResourceExhausted,
+            "deadline_exceeded" => Self::DeadlineExceeded,
             "unavailable" => Self::Unavailable,
             "internal" => Self::Internal,
             _ => Self::Unknown,
@@ -77,14 +81,21 @@ pub enum Error {
 impl Error {
     /// True when retrying the identical request might succeed.
     ///
+    /// The set is the retry contract across all three SDKs:
+    /// `unavailable`, `deadline_exceeded`, `resource_exhausted` — the
+    /// transient upstream states — plus plain network failures. A 500
+    /// `internal` is deliberately absent: it means the gateway itself is
+    /// broken in a way a retry cannot fix, and retrying it hides the bug.
+    ///
     /// Note this says nothing about whether it is SAFE to retry — that
     /// depends on the request's idempotency, which the transport decides.
     pub fn is_retryable(&self) -> bool {
         match self {
             Error::Connection(_) => true,
-            Error::Api { code, .. } => {
-                matches!(code, ErrorCode::Unavailable | ErrorCode::RateLimited)
-            }
+            Error::Api { code, .. } => matches!(
+                code,
+                ErrorCode::Unavailable | ErrorCode::DeadlineExceeded | ErrorCode::ResourceExhausted
+            ),
             _ => false,
         }
     }
@@ -118,14 +129,15 @@ pub(crate) fn api_error(status: u16, body: &str) -> Error {
         // A non-JSON error body means something between the caller and the
         // gateway answered — a proxy, a load balancer, an ingress 502. The
         // status is the only reliable signal, so it is preserved rather
-        // than being flattened into a decode failure.
+        // than being flattened into a decode failure. 502/504 from a proxy
+        // are unavailable for the same reason 503 is.
         Err(_) => Error::Api {
             code: match status {
                 401 => ErrorCode::Unauthenticated,
                 403 => ErrorCode::PermissionDenied,
                 404 => ErrorCode::NotFound,
-                429 => ErrorCode::RateLimited,
-                503 => ErrorCode::Unavailable,
+                429 => ErrorCode::ResourceExhausted,
+                502..=504 => ErrorCode::Unavailable,
                 _ => ErrorCode::Unknown,
             },
             message: if body.is_empty() {

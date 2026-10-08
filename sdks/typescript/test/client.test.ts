@@ -1,6 +1,7 @@
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server, type IncomingMessage } from 'node:http';
+import { inspect } from 'node:util';
 import { AtlasClient, AtlasError, AtlasConnectionError } from '../src/index.js';
 
 /**
@@ -18,7 +19,7 @@ interface Recorded {
 
 let recorded: Recorded[] = [];
 /** Queue of responses; each request pops one. Falls back to 200 {}. */
-let responses: Array<{ status: number; body: string; contentType?: string }> = [];
+let responses: Array<{ status: number; body: string; contentType?: string; headers?: Record<string, string> }> = [];
 
 const server: Server = createServer((req: IncomingMessage, res) => {
   const chunks: Buffer[] = [];
@@ -33,6 +34,7 @@ const server: Server = createServer((req: IncomingMessage, res) => {
     const next = responses.shift() ?? { status: 200, body: '{}' };
     res.writeHead(next.status, {
       'content-type': next.contentType ?? 'application/json',
+      ...(next.headers ?? {}),
     });
     res.end(next.body);
   });
@@ -532,6 +534,29 @@ describe('retries', () => {
   });
 });
 
+describe('rate limiting', () => {
+  test('a 429 with Retry-After surfaces as resource_exhausted and delays the retry', async () => {
+    reset();
+    responses.push({
+      status: 429,
+      body: '{"error":{"code":"resource_exhausted","message":"rate limit exceeded"}}',
+      headers: { 'retry-after': '1' },
+    });
+    responses.push({ status: 200, body: '{"balance_cents":7,"currency":"USD"}' });
+
+    const started = Date.now();
+    const atlas = client({ maxRetries: 1 });
+    const wallet = await atlas.payments.wallet();
+    const elapsed = Date.now() - started;
+
+    assert.equal(wallet.balanceCents, 7);
+    // The server asked for 1 second; the retry must respect it (allowing
+    // a little slop for timer granularity) rather than the ~100ms default.
+    assert.ok(elapsed >= 900, `retry should honour Retry-After, took ${elapsed}ms`);
+    assert.ok(recorded.length === 2);
+  });
+});
+
 describe('project key', () => {
   test('is sent on every request, authenticated or not', async () => {
     reset();
@@ -568,4 +593,20 @@ describe('project key', () => {
     await c.auth.register({ email: 'a@b.dev', password: 'pw' });
     assert.equal(recorded[0]?.headers['x-atlas-key'], TEST_PROJECT_KEY);
   });
+});
+
+// --- credential redaction ---------------------------------------------------
+
+test('credentials never appear in inspect, console, or JSON output', () => {
+  const atlas = new AtlasClient({
+    baseUrl: 'http://example.test',
+    projectKey: 'atl_live_secret_value_do_not_leak',
+  });
+  atlas.setToken('jwt_secret_value_do_not_leak');
+
+  const inspected = inspect(atlas);
+  assert.ok(!inspected.includes('secret_value'), `inspect leaked: ${inspected}`);
+  const json = JSON.stringify(atlas);
+  assert.ok(!json.includes('secret_value'), `toJSON leaked: ${json}`);
+  assert.ok(json.includes('<redacted>'), 'redaction marker missing');
 });

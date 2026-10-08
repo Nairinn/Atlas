@@ -366,3 +366,14 @@ jobs:
       # local HTTP server.
       - name: Test
         run: npm test
+
+      # The package entry point must survive `npm pack`: a tsconfig
+      # rootDir drift puts dist/index.js at dist/src/index.js and nothing
+      # fails until a consumer imports the published tarball.
+      - name: Pack and import check
+        run: |
+          mkdir -p /tmp/packcheck
+          npm pack --pack-destination /tmp/packcheck
+          cd /tmp/packcheck
+          tar xzf atlas-sdk-*.tgz
+          node -e "import('./package/dist/index.js').then(m => { if (!m.AtlasClient) { console.error('AtlasClient missing from the package entry point'); process.exit(1); } console.log('pack entry point OK'); })"

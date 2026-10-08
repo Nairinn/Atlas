@@ -71,8 +71,13 @@ export class Http {
       if (attempt > 0) {
         // Exponential backoff with jitter. Without jitter, every client
         // that saw the same blip retries in lockstep and re-creates it.
+        // A Retry-After the server sent (429) overrides the guess,
+        // capped so a hostile value cannot stall the caller.
         const base = 100 * 2 ** (attempt - 1);
-        await sleep(base + Math.random() * base);
+        const hinted =
+          lastError instanceof AtlasError ? lastError.retryAfterMs : undefined;
+        const wait = Math.max(base, hinted ?? 0) + Math.random() * base;
+        await sleep(wait);
       }
       try {
         return await this.attempt<T>(url, opts);
@@ -128,7 +133,14 @@ export class Http {
     if (response.status === 204) return undefined as T;
 
     const text = await response.text();
-    if (!response.ok) throw toError(response.status, text, opts.path);
+    if (!response.ok) {
+        throw toError(
+          response.status,
+          text,
+          opts.path,
+          parseRetryAfterMs(response.headers.get('retry-after')),
+        );
+      }
     if (text.length === 0) return undefined as T;
 
     try {
@@ -156,7 +168,12 @@ export class Http {
   }
 }
 
-function toError(status: number, text: string, path: string): AtlasError {
+function toError(
+  status: number,
+  text: string,
+  path: string,
+  retryAfterMs?: number | undefined,
+): AtlasError {
   // The envelope is the contract, but a proxy or load balancer can return
   // an HTML error page that never reached the gateway. Fall back rather
   // than throwing a JSON parse error that hides the real status.
@@ -169,7 +186,30 @@ function toError(status: number, text: string, path: string): AtlasError {
   } catch {
     // Not our envelope; keep the raw text.
   }
-  return new AtlasError({ code, message, status, path });
+  return new AtlasError({
+    code,
+    message,
+    status,
+    path,
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+  });
+}
+
+/** The longest a server hint may delay a retry. */
+const MAX_RETRY_AFTER_MS = 30_000;
+
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
+  }
+  // HTTP-date form: trust only if it parses, cap the distance.
+  const at = Date.parse(header);
+  if (!Number.isNaN(at)) {
+    return Math.max(0, Math.min(at - Date.now(), MAX_RETRY_AFTER_MS));
+  }
+  return undefined;
 }
 
 function sleep(ms: number): Promise<void> {

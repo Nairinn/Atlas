@@ -52,15 +52,19 @@ class Http {
     final attempts = idempotent ? maxRetries + 1 : 1;
 
     Object? lastError;
+    int? retryAfterMs;
     for (var attempt = 0; attempt < attempts; attempt++) {
       if (attempt > 0) {
         // Exponential backoff with jitter. Without jitter every client
         // that failed together retries together, and the recovering
-        // service is hit by a synchronised wave.
+        // service is hit by a synchronised wave. A Retry-After the
+        // server sent (429) overrides the guess.
         final base = 100 * (1 << (attempt - 1));
+        final wait = (retryAfterMs ?? 0) > base ? retryAfterMs! : base;
         await Future<void>.delayed(
-          Duration(milliseconds: base + _random.nextInt(base ~/ 2 + 1)),
+          Duration(milliseconds: wait + _random.nextInt(base ~/ 2 + 1)),
         );
+        retryAfterMs = null;
       }
 
       try {
@@ -73,6 +77,7 @@ class Http {
         );
       } on AtlasError catch (e) {
         if (!e.isRetryable || attempt + 1 == attempts) rethrow;
+        retryAfterMs = e.retryAfterMs;
         lastError = e;
       } on AtlasConnectionError catch (e) {
         if (attempt + 1 == attempts) rethrow;
@@ -95,8 +100,14 @@ class Http {
 
     HttpClientResponse response;
     String text;
+    // One overall deadline for the whole attempt. Timing each phase
+    // separately would allow up to 3x the configured timeout for a
+    // single request, which is not what a caller setting `timeout` means.
+    final deadline = DateTime.now().add(timeout);
     try {
-      final request = await _client.openUrl(method, uri).timeout(timeout);
+      final request = await _client
+          .openUrl(method, uri)
+          .timeout(timeout, onTimeout: () => throw TimeoutException('connect'));
 
       // Sent on every request, including register and login: creating a
       // user means creating them in a project.
@@ -109,8 +120,12 @@ class Http {
         request.write(jsonEncode(body));
       }
 
-      response = await request.close().timeout(timeout);
-      text = await response.transform(utf8.decoder).join().timeout(timeout);
+      response =
+          await request.close().timeout(deadline.difference(DateTime.now()));
+      text = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(deadline.difference(DateTime.now()));
     } on TimeoutException {
       throw AtlasConnectionError('request to $uri timed out after $timeout');
     } on SocketException catch (e) {
@@ -121,12 +136,40 @@ class Http {
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
       if (text.trim().isEmpty) return null;
-      return jsonDecode(text);
+      try {
+        return jsonDecode(text);
+      } on FormatException catch (e) {
+        // A 2xx the SDK cannot parse is the server's bug, not the
+        // network's: report it as a decode error so callers can tell the
+        // difference from a connection failure.
+        throw AtlasDecodeError(
+            'malformed JSON in response from $path: ${e.message}');
+      }
     }
-    throw _toError(response.statusCode, text);
+    throw _toError(
+      response.statusCode,
+      text,
+      retryAfterMs: _parseRetryAfterMs(
+        response.headers.value('retry-after'),
+      ),
+    );
   }
 
-  AtlasError _toError(int status, String body) {
+  /// Seconds form only, capped at 30s so a hostile or buggy value cannot
+  /// stall a caller indefinitely. The HTTP-date form is ignored: Atlas's
+  /// own limiters send seconds, and a misread hint degrades to the normal
+  /// backoff rather than a wrong wait.
+  static const _maxRetryAfterMs = 30000;
+
+  int? _parseRetryAfterMs(String? header) {
+    if (header == null) return null;
+    final secs = int.tryParse(header.trim());
+    if (secs == null) return null;
+    if (secs <= 0) return 0;
+    return secs * 1000 > _maxRetryAfterMs ? _maxRetryAfterMs : secs * 1000;
+  }
+
+  AtlasError _toError(int status, String body, {int? retryAfterMs}) {
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map<String, dynamic>) {
@@ -136,6 +179,7 @@ class Http {
             code: AtlasErrorCode.fromWire(envelope['code'] as String?),
             message: envelope['message'] as String? ?? 'unknown error',
             status: status,
+            retryAfterMs: retryAfterMs,
           );
         }
       }
@@ -150,6 +194,7 @@ class Http {
           ? 'HTTP $status'
           : body.substring(0, body.length < 200 ? body.length : 200),
       status: status,
+      retryAfterMs: retryAfterMs,
     );
   }
 
@@ -158,8 +203,8 @@ class Http {
         403 => AtlasErrorCode.permissionDenied,
         404 => AtlasErrorCode.notFound,
         409 => AtlasErrorCode.alreadyExists,
-        429 => AtlasErrorCode.rateLimited,
-        503 => AtlasErrorCode.unavailable,
+        429 => AtlasErrorCode.resourceExhausted,
+        502 || 503 || 504 => AtlasErrorCode.unavailable,
         _ => AtlasErrorCode.unknown,
       };
 }

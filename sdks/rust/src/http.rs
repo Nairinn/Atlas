@@ -152,14 +152,19 @@ impl Http {
         };
 
         let mut last: Option<Error> = None;
+        let mut retry_after_ms: Option<u64> = None;
         for attempt in 0..attempts {
             if attempt > 0 {
                 // Exponential backoff with jitter. Without jitter, every
                 // client that failed together retries together, and the
                 // recovering service is hit by a synchronised wave.
+                // A Retry-After the server sent (429) overrides the
+                // guess, capped so a hostile value cannot stall the caller.
                 let base = 100u64 << (attempt - 1);
                 let jitter = fastrand_u64() % (base / 2 + 1);
-                tokio::time::sleep(Duration::from_millis(base + jitter)).await;
+                let wait = (retry_after_ms.unwrap_or(0)).max(base) + jitter;
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                retry_after_ms = None;
             }
 
             let mut builder = self
@@ -182,10 +187,16 @@ impl Http {
             match builder.send().await {
                 Ok(response) => {
                     let status = response.status();
+                    let hint = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(parse_retry_after_ms);
                     let text = response.text().await.unwrap_or_default();
                     if status.is_success() {
                         return Ok(text);
                     }
+                    retry_after_ms = hint;
                     let err = api_error(status.as_u16(), &text);
                     if !err.is_retryable() || attempt + 1 == attempts {
                         return Err(err);
@@ -234,4 +245,16 @@ fn fastrand_u64() -> u64 {
         s.set(x);
         x
     })
+}
+
+/// The longest a server hint may delay a retry.
+const MAX_RETRY_AFTER_MS: u64 = 30_000;
+
+/// Seconds form only, capped at 30s so a hostile or buggy value cannot
+/// stall a caller indefinitely. The HTTP-date form is ignored: Atlas's
+/// own limiters send seconds, and a misread hint degrades to the normal
+/// backoff rather than a wrong wait.
+fn parse_retry_after_ms(header: &str) -> Option<u64> {
+    let secs = header.trim().parse::<u64>().ok()?;
+    Some(secs.saturating_mul(1000).min(MAX_RETRY_AFTER_MS))
 }
