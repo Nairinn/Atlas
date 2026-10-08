@@ -30,22 +30,20 @@ private val LOG = LoggerFactory.getLogger("io.atlas.payments.http.HttpServer")
  * provider webhooks. Consolidating them onto one port keeps the service to one
  * HTTP listener (gRPC is separate, on its own port).
  *
- *   GET  /metrics                          Prometheus exposition (Micrometer)
- *   GET  /healthz                          liveness ping
- *   POST /webhooks/stripe/{project_id}     Stripe events for one project
- *   POST /webhooks/{provider}              legacy single-tenant path; kept
- *                                          only for the fake provider, which
- *                                          has no project scoping
+ *   GET  /metrics                       Prometheus exposition (Micrometer)
+ *   GET  /healthz                       liveness ping
+ *   POST /webhooks/stripe/{project_id}  Stripe events for one project
  *
  * The Stripe endpoint is per-project because each tenant registers its own
- * webhook endpoint in its own Stripe dashboard, so the signing secret —
- * and the credentials the events refer to — are per tenant. The project id
- * in the path selects the config row the signature is verified against.
+ * webhook endpoint in its own Stripe dashboard, so the signing secret — and
+ * the credentials the events refer to — are per tenant. The project id in
+ * the path selects the config row the signature is verified against.
  */
 fun startHttpServer(
     port: Int,
     registry: PrometheusMeterRegistry,
     provider: PaymentProvider,
+    metrics: PaymentsMetrics,
     webhookHandler: ((projectId: UUID, eventType: String, payload: String) -> StripeWebhookHandler.Result)? = null,
 ): NettyApplicationEngine =
     embeddedServer(Netty, port = port) {
@@ -64,10 +62,13 @@ fun startHttpServer(
                     return@post
                 }
 
-                // Bounded before reading, same reasoning as below: this
-                // endpoint is unauthenticated by nature.
+                // Bounded before reading: the endpoint is unauthenticated by
+                // nature — the signature covers the body, so the body must be
+                // read before it can be checked. The cap stops an anonymous
+                // caller from making the service allocate memory at will.
                 val declared = call.request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
                 if (declared != null && declared > MAX_WEBHOOK_BYTES) {
+                    metrics.webhookProcessed(BAD_SIGNATURE_FREE_OUTCOME)
                     call.respond(HttpStatusCode.PayloadTooLarge)
                     return@post
                 }
@@ -82,79 +83,37 @@ fun startHttpServer(
                 val signature = call.request.headers["Stripe-Signature"]
                 if (!provider.verifyWebhook(projectId, body, signature)) {
                     LOG.warn("rejected stripe webhook for project={}: bad signature", projectId)
+                    metrics.webhookProcessed("bad_signature")
                     call.respond(HttpStatusCode.Unauthorized)
                     return@post
                 }
 
                 if (webhookHandler == null) {
-                    // Verified but nobody is acting on it yet — an honest
-                    // 202 rather than a lie of a 200.
+                    // Verified but nobody is acting on it — an honest 202.
                     call.respond(HttpStatusCode.Accepted)
                     return@post
                 }
 
                 val eventType = call.request.headers["Stripe-Event-Type"]
                     ?: webhookEventTypeFromBody(body)
-                when (val result = webhookHandler(projectId, eventType, body)) {
-                    is StripeWebhookHandler.Result.Applied ->
+                val outcome = when (val result = webhookHandler(projectId, eventType, body)) {
+                    is StripeWebhookHandler.Result.Applied -> {
                         LOG.info("stripe webhook project={} applied: {}", projectId, result.what)
-                    is StripeWebhookHandler.Result.Ignored ->
+                        "applied"
+                    }
+                    is StripeWebhookHandler.Result.Ignored -> {
                         LOG.debug("stripe webhook project={} ignored: {}", projectId, result.why)
-                    is StripeWebhookHandler.Result.Malformed ->
+                        "ignored"
+                    }
+                    is StripeWebhookHandler.Result.Malformed -> {
                         LOG.warn("stripe webhook project={} malformed: {}", projectId, result.why)
+                        "malformed"
+                    }
                 }
+                metrics.webhookProcessed(outcome)
                 // All three outcomes are "delivered" from Stripe's point of
-                // view. A 500 would mean retry-forever on an event that
-                // will never parse better the second time.
-                call.respond(HttpStatusCode.OK)
-            }
-            post("/webhooks/{provider}") {
-                val source = call.parameters["provider"] ?: "unknown"
-
-                // Bounded before reading. This endpoint is unauthenticated
-                // by nature — the signature is checked after the body is
-                // in hand, because the signature covers the body — so an
-                // unbounded read here is a way for anyone on the internet
-                // to make the service allocate as much memory as they
-                // like. Provider events are a few kilobytes; 1MB is
-                // generous.
-                val declared = call.request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
-                if (declared != null && declared > MAX_WEBHOOK_BYTES) {
-                    LOG.warn("rejected oversized webhook from provider={} bytes={}", source, declared)
-                    call.respond(HttpStatusCode.PayloadTooLarge)
-                    return@post
-                }
-                val body = call.receiveText()
-                if (body.length > MAX_WEBHOOK_BYTES) {
-                    // A chunked request declares no length, so the cap is
-                    // enforced again on what actually arrived.
-                    LOG.warn("rejected oversized webhook from provider={}", source)
-                    call.respond(HttpStatusCode.PayloadTooLarge)
-                    return@post
-                }
-
-                // Verify BEFORE doing anything with the payload. This
-                // endpoint is an unauthenticated write path from the public
-                // internet into a payments system; the only thing making it
-                // safe is that the provider signed the request.
-                //
-                // The check runs even though FakePaymentProvider accepts
-                // everything, so the call site exists and cannot be
-                // forgotten when a real provider is wired in. Verification
-                // is provider-specific, which is why it lives on the
-                // PaymentProvider interface rather than here.
-                val signature = call.request.headers["Stripe-Signature"]
-                    ?: call.request.headers["X-Webhook-Signature"]
-                if (!provider.verifyWebhook(projectIdFromPath(), body, signature)) {
-                    LOG.warn("rejected webhook from provider={}: bad signature", source)
-                    call.respond(HttpStatusCode.Unauthorized)
-                    return@post
-                }
-
-                // Acknowledged and logged. Reconciling the referenced charge
-                // against payments.transactions is the next step and needs a
-                // real provider's event schema to be worth writing.
-                LOG.info("accepted webhook from provider={} bytes={}", source, body.length)
+                // view. A 500 would mean retry-forever on an event that will
+                // never parse better the second time.
                 call.respond(HttpStatusCode.OK)
             }
         }
@@ -165,6 +124,9 @@ fun startHttpServer(
  */
 private const val MAX_WEBHOOK_BYTES = 1_000_000
 
+/** Oversized bodies are refused before any signature work: not a signature failure. */
+private const val BAD_SIGNATURE_FREE_OUTCOME = "oversized"
+
 /**
  * The event type from the body when the header is absent. Stripe does not
  * reliably send a type header, so the fallback reads `type` off the JSON
@@ -173,38 +135,15 @@ private const val MAX_WEBHOOK_BYTES = 1_000_000
 private fun webhookEventTypeFromBody(body: String): String =
     Regex(""""type"\s*:\s*"([^"]+)"""").find(body)?.groupValues?.getOrNull(1) ?: "unknown"
 
-/**
- * The legacy single-tenant webhook path has no project in the URL, so it
- * verifies against... nothing, which is exactly what it should do: the
- * fake provider accepts everything, and any future provider that uses
- * this path must decide for itself what "no project" means rather than
- * inheriting a silent default. A UUID that matches no config row is the
- * value guaranteed to fail every real verification.
- */
-private fun projectIdFromPath(): UUID =
-    UUID.fromString("00000000-0000-0000-0000-000000000000")
-
 /** Creates the Prometheus registry App.kt shares with the HTTP server and metrics. */
 fun newPrometheusRegistry(): PrometheusMeterRegistry =
     PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
 
-/** Micrometer-backed [PaymentsMetrics] exposed via /metrics. */
 /**
- * Register outbox depth as GAUGES fed by a supplier.
- *
- * Gauges rather than counters because the question is "how much is stuck
- * right now", and Micrometer polls the supplier at scrape time so the
- * value is never stale.
- *
- * This is the signal payments actually needs. `outbox_dispatched_total`
- * is a counter of SUCCESSES: when Kafka is unreachable it simply stops
- * increasing, and a counter that stops looks exactly like a system with
- * nothing to do. Depth goes UP when the drain is stuck, which is a
- * statement rather than an absence.
- *
- * Two series, because they answer different questions: row count says how
- * much is waiting, and the age of the oldest row distinguishes "busy"
- * from "wedged" — a large backlog that is draining has a young head.
+ * Register outbox depth as GAUGES fed by a supplier, so Micrometer polls at
+ * scrape time and the value is never stale. Depth and age are the signals
+ * that mean "stuck": the dispatched counter is a counter of SUCCESSES, and
+ * a counter that stops increasing is indistinguishable from nothing to do.
  */
 fun registerOutboxGauges(registry: MeterRegistry, backend: OutboxBackend) {
     registry.gauge("atlas_payments_outbox_pending_rows", backend) {
@@ -226,23 +165,43 @@ class MicrometerPaymentsMetrics(registry: MeterRegistry) : PaymentsMetrics {
         registry.counter("atlas_payments_reconciled_total", "outcome", "unresolved")
     private val settled = registry.counter("atlas_payments_transactions_settled_total")
     private val refunded = registry.counter("atlas_payments_transactions_refunded_total")
+    private val cancelled = registry.counter("atlas_payments_transactions_cancelled_total")
     private val dispatched = registry.counter("atlas_payments_outbox_dispatched_total")
     private val depositOk = registry.counter("atlas_payments_deposits_total", "outcome", "settled")
     private val depositFail = registry.counter("atlas_payments_deposits_total", "outcome", "failed")
+    private val webhook =
+        registry.counter("atlas_payments_webhook_total", "outcome", "applied")
+    private val webhookIgnored =
+        registry.counter("atlas_payments_webhook_total", "outcome", "ignored")
+    private val webhookMalformed =
+        registry.counter("atlas_payments_webhook_total", "outcome", "malformed")
+    private val webhookBadSignature =
+        registry.counter("atlas_payments_webhook_total", "outcome", "bad_signature")
 
     override fun transactionInitiated() = initiated.increment()
     override fun transactionSettled() = settled.increment()
     override fun transactionRefunded() = refunded.increment()
+    override fun transactionCancelled() = cancelled.increment()
     override fun reconciled(settled: Int, failed: Int, unresolved: Int) {
         if (settled > 0) reconciledSettled.increment(settled.toDouble())
         if (failed > 0) reconciledFailed.increment(failed.toDouble())
         // Always recorded, including zero, so the series exists before
-        // anything goes wrong. An alert on a metric that only appears
-        // during an incident cannot fire during the incident.
+        // anything goes wrong.
         reconciledUnresolved.increment(unresolved.toDouble())
     }
 
     override fun outboxDispatched(count: Int) = dispatched.increment(count.toDouble())
     override fun depositSettled() = depositOk.increment()
     override fun depositFailed() = depositFail.increment()
+
+    override fun webhookProcessed(outcome: String) {
+        when (outcome) {
+            "applied" -> webhook.increment()
+            "ignored" -> webhookIgnored.increment()
+            "malformed" -> webhookMalformed.increment()
+            "bad_signature" -> webhookBadSignature.increment()
+            // Unknown outcomes (e.g. the oversized pre-check) are not
+            // counted: they never reached the handler.
+        }
+    }
 }

@@ -275,15 +275,21 @@ class Deposit {
 }
 
 class Transaction {
-  Transaction({required this.transactionId, required this.status});
+  Transaction({required this.transactionId, required this.status, this.clientSecret});
 
   factory Transaction.fromJson(Map<String, dynamic> json) => Transaction(
         transactionId: json['transaction_id'] as String,
         status: json['status'] as String,
+        // The processor's client_secret under the client-side-confirmation
+        // flow; null when the flow does not use one.
+        clientSecret: (json['client_secret'] as String?)?.isEmpty == true
+            ? null
+            : json['client_secret'] as String?,
       );
 
   final String transactionId;
   final String status;
+  final String? clientSecret;
 }
 
 class OnboardingUrl {

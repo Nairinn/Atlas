@@ -2,6 +2,7 @@ package io.atlas.payments
 
 import io.atlas.payments.core.ChargeRequest
 import io.atlas.payments.core.PaymentProvider
+import io.atlas.payments.core.PaymentsMetrics
 import io.atlas.payments.core.ProviderResult
 import io.atlas.payments.core.ProviderStatus
 import io.atlas.payments.http.newPrometheusRegistry
@@ -30,6 +31,9 @@ import kotlin.test.assertTrue
  */
 class WebhookEndpointTest {
 
+    /** Any UUID parses; the fake providers ignore which project it names. */
+    private val PROJECT = UUID.randomUUID()
+
     /** Says no to everything, and records that it was asked. */
     private class RejectingProvider : PaymentProvider {
         override val name = "rejecting"
@@ -41,6 +45,8 @@ class WebhookEndpointTest {
 
         override fun capture(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
         override fun refund(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun cancel(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun clientSecret(projectId: UUID, providerRef: String): String? = null
         override fun lookup(projectId: UUID, providerRef: String) = ProviderStatus.UNKNOWN
 
         override fun verifyWebhook(projectId: UUID, payload: String, signature: String?): Boolean {
@@ -59,6 +65,8 @@ class WebhookEndpointTest {
 
         override fun capture(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
         override fun refund(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun cancel(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun clientSecret(projectId: UUID, providerRef: String): String? = null
         override fun lookup(projectId: UUID, providerRef: String) = ProviderStatus.UNKNOWN
 
         override fun verifyWebhook(projectId: UUID, payload: String, signature: String?): Boolean {
@@ -78,7 +86,7 @@ class WebhookEndpointTest {
         // A port the OS just told us was free. Racy in principle, fine in
         // practice, and far simpler than plumbing Ktor's resolved port out.
         val port = ServerSocket(0).use { it.localPort }
-        engine = startHttpServer(port, newPrometheusRegistry(), provider)
+        engine = startHttpServer(port, newPrometheusRegistry(), provider, PaymentsMetrics.NOOP)
         // Wait for the listener rather than sleeping a fixed amount.
         val deadline = System.currentTimeMillis() + 10_000
         while (System.currentTimeMillis() < deadline) {
@@ -93,7 +101,7 @@ class WebhookEndpointTest {
     }
 
     private fun post(port: Int, body: String, signature: String? = null): Int {
-        val conn = URI("http://127.0.0.1:$port/webhooks/test").toURL()
+        val conn = URI("http://127.0.0.1:$port/webhooks/stripe/$PROJECT").toURL()
             .openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
@@ -125,11 +133,13 @@ class WebhookEndpointTest {
     }
 
     @Test
-    fun `a verified webhook is accepted`() {
+    fun `a verified webhook with no handler is acknowledged as 202`() {
         val provider = AcceptingProvider()
         val port = serve(provider)
 
-        assertEquals(200, post(port, """{"id":"evt_1"}""", "t=1,v1=whatever"))
+        // Verified, but no handler wired in this harness: an honest 202
+        // rather than a 200 that pretends the event was acted on.
+        assertEquals(202, post(port, """{"id":"evt_1"}""", "t=1,v1=whatever"))
         assertEquals(
             """{"id":"evt_1"}""",
             provider.lastPayload,
@@ -150,5 +160,16 @@ class WebhookEndpointTest {
 
         assertEquals(413, post(port, huge, "t=1,v1=abc"))
         assertEquals(0, provider.asked, "there is no point verifying what we refuse to hold")
+    }
+
+    @Test
+    fun `a malformed project id is a 400`() {
+        val port = serve(RejectingProvider())
+        val conn = URI("http://127.0.0.1:$port/webhooks/stripe/not-a-uuid").toURL()
+            .openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.outputStream.use { it.write("{}".toByteArray()) }
+        assertEquals(400, conn.responseCode)
     }
 }

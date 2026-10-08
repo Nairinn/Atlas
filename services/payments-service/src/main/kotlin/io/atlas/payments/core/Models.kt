@@ -32,6 +32,14 @@ data class TxRecord(
     val idempotencyArgsHash: String?,
     /** One of [TxKind]. Defaulted so existing construction sites are unchanged. */
     val kind: String = TxKind.TRANSFER,
+    /**
+     * True when the charge went to the processor with a destination
+     * account (a Connect fare): the payer's card pays, not their wallet.
+     * Fixed at initiation; settle and the webhook both read it.
+     */
+    val cardFunded: Boolean = false,
+    /** When the row was created; the sweep's hold-expiry clock. */
+    val createdAt: java.time.Instant? = null,
 )
 
 /** A pending outbox row claimed by the dispatcher for publishing. */
@@ -79,4 +87,7 @@ object TxStatus {
     const val SETTLED = "settled"
     const val FAILED = "failed"
     const val REFUNDED = "refunded"
+
+    /** An authorization voided before capture; no money moved. */
+    const val CANCELLED = "cancelled"
 }

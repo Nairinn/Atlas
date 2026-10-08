@@ -536,6 +536,7 @@ class PaymentsApi {
     const res = await this.http.request<{
       transaction_id: string;
       status: string;
+      client_secret: string;
     }>({
       method: 'POST',
       path: '/v1/payments/transactions',
@@ -549,7 +550,11 @@ class PaymentsApi {
         ...(params.rideId !== undefined ? { ride_id: params.rideId } : {}),
       },
     });
-    return { transactionId: res.transaction_id, status: res.status };
+    return {
+      transactionId: res.transaction_id,
+      status: res.status,
+      ...(res.client_secret ? { clientSecret: res.client_secret } : {}),
+    };
   }
 
   /**

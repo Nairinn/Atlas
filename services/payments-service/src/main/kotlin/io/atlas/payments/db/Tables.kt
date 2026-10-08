@@ -38,6 +38,7 @@ object Transactions : Table("payments.transactions") {
     val providerRef = text("provider_ref").nullable()
     val idempotencyArgsHash = text("idempotency_args_hash").nullable()
     val kind = text("kind")
+    val cardFunded = bool("card_funded")
 
     override val primaryKey = PrimaryKey(id)
 

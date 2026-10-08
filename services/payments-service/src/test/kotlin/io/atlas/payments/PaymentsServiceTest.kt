@@ -163,11 +163,17 @@ class PaymentsServiceTest {
     }
 
     @Test
-    fun `refund of a pending transaction is rejected`() {
-        val tx = transactions.findById(projectA, service.initiate(projectA, rider, driver, 1500, "key-1", ride).transactionId)!!
-        assertFailsWith<PaymentError.InvalidState> {
-            service.refund(projectA, tx.id.toString())
-        }
+    fun `refund of a pending transaction cancels it instead`() {
+        val initiate = service.initiate(projectA, rider, driver, 1500, "key-1", ride)
+        val tx = transactions.findById(projectA, initiate.transactionId)!!
+
+        val result = service.refund(projectA, tx.id.toString())
+
+        assertTrue(result.success)
+        assertEquals(TxStatus.CANCELLED, transactions.findById(projectA, tx.id)!!.status)
+        // Nothing was captured, so nothing moves and nothing is owed.
+        assertEquals(0, wallets.findByUser(projectA, UUID.fromString(rider))!!.balanceCents)
+        assertEquals(0, wallets.findByUser(projectA, UUID.fromString(driver))!!.balanceCents)
     }
 
     // --- wallet -----------------------------------------------------------

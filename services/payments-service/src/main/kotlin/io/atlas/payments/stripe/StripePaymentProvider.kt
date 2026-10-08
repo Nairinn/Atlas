@@ -8,12 +8,10 @@ import com.stripe.param.PaymentIntentCaptureParams
 import com.stripe.param.PaymentIntentCreateParams
 import com.stripe.param.RefundCreateParams
 import io.atlas.payments.core.ChargeRequest
-import io.atlas.payments.core.PaymentError
-import io.atlas.payments.core.PaymentError.DriverNotOnboarded
 import io.atlas.payments.core.HmacWebhookVerifier
 import io.atlas.payments.core.PaymentConfigSource
+import io.atlas.payments.core.PaymentError
 import io.atlas.payments.core.PaymentProvider
-import io.atlas.payments.core.PayoutAccountSource
 import io.atlas.payments.core.ProviderResult
 import io.atlas.payments.core.ProviderStatus
 import java.util.UUID
@@ -63,16 +61,25 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class StripePaymentProvider(
     private val configs: PaymentConfigSource,
-    private val payoutAccounts: PayoutAccountSource,
     /** Overrides where API calls go; null means api.stripe.com. */
     apiBase: String? = null,
 ) : PaymentProvider {
 
     override val name: String = "stripe"
 
+    /** The override captured at construction; see the init note. */
+    private var stripeApiBase: String? = null
+
     init {
-        // JVM-global: set once at construction, never per call.
-        if (apiBase != null) Stripe.overrideApiBase(apiBase)
+        // stripe-java 34's StripeClient builder HARDCODES the api base; the
+        // Stripe.overrideApiBase static only affects the legacy global API.
+        // Both are set so any entry path hits the override (stripe-mock).
+        if (apiBase != null) {
+            Stripe.overrideApiBase(apiBase)
+            stripeApiBase = apiBase
+        } else {
+            stripeApiBase = null
+        }
     }
 
     private val clients = ConcurrentHashMap<UUID, StripeClient>()
@@ -85,7 +92,12 @@ class StripePaymentProvider(
             )
 
     private fun clientFor(projectId: UUID): StripeClient =
-        clients.computeIfAbsent(projectId) { StripeClient(configFor(projectId).secretKey) }
+        clients.computeIfAbsent(projectId) { key ->
+            val config = configFor(key)
+            val builder = StripeClient.builder().setApiKey(config.secretKey)
+            stripeApiBase?.let { builder.setApiBase(it) }
+            builder.build()
+        }
 
     private fun options(projectId: UUID, idempotencyKey: String? = null): RequestOptions {
         val builder = RequestOptions.builder().setApiKey(configFor(projectId).secretKey)
@@ -102,20 +114,19 @@ class StripePaymentProvider(
         val params = PaymentIntentCreateParams.builder()
             .setAmount(request.amountCents)
             .setCurrency(config.currency)
-            // Manual capture: the whole point of the pending window is
-            // that capture happens at settlement, when the ride completes.
+            // Manual capture: capture happens at settlement, when the ride
+            // completes. The client confirms the payment with Stripe's
+            // client SDK using the returned client_secret (D1); the server
+            // only captures.
             .setCaptureMethod(PaymentIntentCreateParams.CaptureMethod.MANUAL)
             .putMetadata("atlas_project_id", request.projectId.toString())
             .putMetadata("atlas_user_id", request.userId.toString())
 
         // A fare pays the driver's connected account; a deposit pays
-        // nobody. The distinction is presence of the destination, not a
-        // flag: a deposit with a destination would move money to a
-        // driver for no ride.
+        // nobody. The service already resolved (and checked) the payee's
+        // destination; there is nothing to re-verify here.
         val destination = request.destinationAccountId
         if (destination != null) {
-            val account = payoutAccounts.accountFor(request.projectId, request.userId)
-            if (account == null || !account.payoutsEnabled) throw DriverNotOnboarded(request.userId)
             params.setTransferData(
                 PaymentIntentCreateParams.TransferData.builder()
                     .setDestination(destination)
@@ -127,7 +138,7 @@ class StripePaymentProvider(
         return try {
             val intent = clientFor(request.projectId)
                 .paymentIntents().create(params.build(), options(request.projectId, idempotencyKey))
-            ProviderResult(success = true, providerRef = intent.id)
+            ProviderResult(success = true, providerRef = intent.id, clientSecret = intent.clientSecret)
         } catch (e: StripeException) {
             ProviderResult(success = false, providerRef = "", message = e.stripeError?.message ?: e.message)
         }
@@ -144,6 +155,15 @@ class StripePaymentProvider(
         ProviderResult(success = false, providerRef = providerRef, message = e.stripeError?.message ?: e.message)
     }
 
+    override fun cancel(projectId: UUID, providerRef: String): ProviderResult = try {
+        val intent = clientFor(projectId)
+            .paymentIntents()
+            .cancel(providerRef, options(projectId))
+        ProviderResult(success = intent.status == "canceled", providerRef = intent.id)
+    } catch (e: StripeException) {
+        ProviderResult(success = false, providerRef = providerRef, message = e.stripeError?.message ?: e.message)
+    }
+
     override fun refund(projectId: UUID, providerRef: String): ProviderResult = try {
         val refund = clientFor(projectId)
             .refunds()
@@ -156,12 +176,19 @@ class StripePaymentProvider(
         ProviderResult(success = false, providerRef = providerRef, message = e.stripeError?.message ?: e.message)
     }
 
+    override fun clientSecret(projectId: UUID, providerRef: String): String? = try {
+        clientFor(projectId).paymentIntents().retrieve(providerRef, options(projectId)).clientSecret
+    } catch (e: StripeException) {
+        null
+    }
+
     override fun lookup(projectId: UUID, providerRef: String): ProviderStatus = try {
         when (clientFor(projectId).paymentIntents().retrieve(providerRef, options(projectId)).status) {
             "succeeded" -> ProviderStatus.CAPTURED
             "requires_capture" -> ProviderStatus.AUTHORIZED
+            "requires_confirmation", "requires_action" -> ProviderStatus.AWAITING_CUSTOMER
+            "requires_payment_method" -> ProviderStatus.FAILED
             "canceled" -> ProviderStatus.FAILED
-            "requires_payment_method", "requires_confirmation" -> ProviderStatus.FAILED
             else -> ProviderStatus.UNKNOWN
         }
     } catch (e: StripeException) {

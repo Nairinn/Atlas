@@ -151,6 +151,11 @@ pub struct Deposit {
 pub struct Transaction {
     pub transaction_id: String,
     pub status: String,
+    /// The processor's client_secret under the client-side-confirmation
+    /// flow: present it to the processor's client SDK to complete the
+    /// payment. Absent when the flow does not use one.
+    #[serde(default)]
+    pub client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -163,6 +163,11 @@ pub struct InitiateBody {
 pub struct TransactionOut {
     pub transaction_id: String,
     pub status: String,
+    /// The processor's client_secret under the client-side confirmation
+    /// flow (D1): the app's client presents it to the processor's client
+    /// SDK to complete the payment. The server never captures until the
+    /// client has confirmed. Empty when the flow does not use one.
+    pub client_secret: String,
 }
 
 /// Start a transaction from the caller's wallet.
@@ -224,6 +229,7 @@ async fn initiate(
         Json(TransactionOut {
             transaction_id: resp.transaction_id,
             status: resp.status,
+            client_secret: resp.client_secret,
         }),
     ))
 }

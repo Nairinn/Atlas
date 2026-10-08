@@ -7,6 +7,8 @@ import io.atlas.payments.core.ProviderStatus
 import io.atlas.payments.core.ReconciliationSweep
 import io.atlas.payments.core.TxKind
 import io.atlas.payments.core.TxStatus
+import io.atlas.payments.core.SettlementApplier
+import io.atlas.payments.fakes.InMemoryOutbox
 import io.atlas.payments.fakes.InMemoryTransactionRepository
 import io.atlas.payments.fakes.InMemoryWalletRepository
 import io.atlas.payments.fakes.DirectTransactionRunner
@@ -48,6 +50,8 @@ class ReconciliationTest {
 
         override fun capture(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
         override fun refund(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun cancel(projectId: UUID, providerRef: String) = ProviderResult(true, providerRef)
+        override fun clientSecret(projectId: UUID, providerRef: String): String? = null
         override fun verifyWebhook(projectId: UUID, payload: String, signature: String?) = true
 
         override fun lookup(projectId: UUID, providerRef: String): ProviderStatus {
@@ -67,12 +71,20 @@ class ReconciliationTest {
     private fun harness(provider: ScriptedProvider): Harness {
         val transactions = InMemoryTransactionRepository()
         val wallets = InMemoryWalletRepository()
+        val outbox = InMemoryOutbox()
+        val applier = SettlementApplier(
+            wallets = wallets,
+            transactions = transactions,
+            runner = DirectTransactionRunner(),
+            outbox = outbox,
+            fareTopic = "atlas.fare.events",
+            clock = clock,
+        )
         return Harness(
             ReconciliationSweep(
                 transactions = transactions,
-                wallets = wallets,
+                applier = applier,
                 provider = provider,
-                runner = DirectTransactionRunner(),
                 stuckAfter = Duration.ofMinutes(15),
                 clock = clock,
             ),
@@ -196,13 +208,38 @@ class ReconciliationTest {
         assertEquals(TxStatus.PENDING, h.transactions.findById(project, id)!!.status)
     }
 
-    /** Still authorized means still in flight — slow, not stuck. */
+    /** Still authorized means still in flight — a normal hold, not unresolved. */
     @Test
-    fun `a charge still in flight is left for the next pass`() {
+    fun `a young authorized hold is left alone and is not unresolved`() {
         val h = harness(ScriptedProvider(mapOf("ref_1" to ProviderStatus.AUTHORIZED)))
-        val id = stuckTransaction(h, Duration.ofHours(1))
+        val id = stuckTransaction(h, Duration.ofMinutes(30))
 
-        assertEquals(1, h.sweep.runOnce().unresolved)
+        val outcome = h.sweep.runOnce()
+        assertEquals(0, outcome.unresolved, "a normal hold must not page anyone")
+        assertEquals(0, outcome.cancelled)
+        assertEquals(TxStatus.PENDING, h.transactions.findById(project, id)!!.status)
+    }
+
+    /** An authorized hold past the expiry is voided: the ride is dead. */
+    @Test
+    fun `an authorized hold older than the expiry is cancelled`() {
+        val h = harness(ScriptedProvider(mapOf("ref_1" to ProviderStatus.AUTHORIZED)))
+        val id = stuckTransaction(h, Duration.ofHours(8))
+
+        val outcome = h.sweep.runOnce()
+        assertEquals(1, outcome.cancelled)
+        assertEquals(TxStatus.CANCELLED, h.transactions.findById(project, id)!!.status)
+    }
+
+    /** D1: awaiting the customer's confirmation is a normal hold, too. */
+    @Test
+    fun `a young awaiting-customer hold is left alone`() {
+        val h = harness(ScriptedProvider(mapOf("ref_1" to ProviderStatus.AWAITING_CUSTOMER)))
+        val id = stuckTransaction(h, Duration.ofMinutes(30))
+
+        val outcome = h.sweep.runOnce()
+        assertEquals(0, outcome.unresolved)
+        assertEquals(0, outcome.cancelled)
         assertEquals(TxStatus.PENDING, h.transactions.findById(project, id)!!.status)
     }
 

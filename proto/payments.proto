@@ -77,6 +77,11 @@ message TransactionRequest {
 message TransactionResponse {
   string transaction_id = 1;
   string status = 2;
+  // The PaymentIntent's client_secret when the provider uses client-side
+  // confirmation (D1): the app's client presents it to the processor's
+  // client SDK to complete the payment; the server only captures. Empty
+  // for providers without that flow.
+  string client_secret = 3;
 }
 
 message SettleRequest  { string transaction_id = 1; string project_id = 2; }

@@ -5,6 +5,7 @@ import io.atlas.payments.core.PayoutAccountSource
 import io.atlas.payments.core.PaymentConfigSource
 import io.atlas.payments.core.ProjectPaymentConfig
 import io.atlas.payments.crypto.ConfigCipher
+import io.atlas.payments.stripe.StripeOnboarding
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
@@ -80,7 +81,7 @@ class ExposedPaymentConfigSource(
     )
 }
 
-class ExposedPayoutAccountSource : PayoutAccountSource {
+class ExposedPayoutAccountSource : PayoutAccountSource, StripeOnboarding.AccountStore {
 
     override fun accountFor(projectId: UUID, userId: UUID): PayoutAccount? = transaction {
         StripeAccounts
@@ -103,36 +104,40 @@ class ExposedPayoutAccountSource : PayoutAccountSource {
         }
     }
 
-    /** Persist a newly created (or resumed) connected account row. */
-    fun saveOnboarding(
-        projectId: UUID,
-        userId: UUID,
-        stripeAccountId: String,
-        onboardingUrl: String,
-    ): PayoutAccount = transaction {
-        val existing = StripeAccounts
-            .selectAll()
-            .where { (StripeAccounts.projectId eq projectId) and (StripeAccounts.userId eq userId) }
-            .singleOrNull()
+    /** StripeOnboarding.AccountStore: same lookup as [accountFor]. */
+    override fun find(projectId: UUID, userId: UUID): PayoutAccount? = accountFor(projectId, userId)
 
-        if (existing == null) {
-            StripeAccounts.insert {
-                it[StripeAccounts.projectId] = projectId
-                it[StripeAccounts.userId] = userId
-                it[StripeAccounts.stripeAccountId] = stripeAccountId
-                it[payoutsEnabled] = false
-                it[StripeAccounts.onboardingUrl] = onboardingUrl
-                it[createdAt] = java.time.Instant.now()
-                it[updatedAt] = java.time.Instant.now()
-            }
-        } else {
-            StripeAccounts.update({
-                (StripeAccounts.projectId eq projectId) and (StripeAccounts.userId eq userId)
-            }) {
-                it[StripeAccounts.onboardingUrl] = onboardingUrl
-                it[updatedAt] = java.time.Instant.now()
+    /**
+     * Insert, or update the stored account id if it drifted (the row must
+     * always name the account a link was actually minted for).
+     */
+    override fun save(projectId: UUID, userId: UUID, stripeAccountId: String, onboardingUrl: String) {
+        transaction {
+            val existingId = StripeAccounts
+                .selectAll()
+                .where { (StripeAccounts.projectId eq projectId) and (StripeAccounts.userId eq userId) }
+                .singleOrNull()
+                ?.get(StripeAccounts.id)
+
+            if (existingId == null) {
+                StripeAccounts.insert {
+                    it[StripeAccounts.projectId] = projectId
+                    it[StripeAccounts.userId] = userId
+                    it[StripeAccounts.stripeAccountId] = stripeAccountId
+                    it[payoutsEnabled] = false
+                    it[StripeAccounts.onboardingUrl] = onboardingUrl
+                    it[createdAt] = java.time.Instant.now()
+                    it[updatedAt] = java.time.Instant.now()
+                }
+            } else {
+                StripeAccounts.update({
+                    (StripeAccounts.projectId eq projectId) and (StripeAccounts.userId eq userId)
+                }) {
+                    it[StripeAccounts.stripeAccountId] = stripeAccountId
+                    it[StripeAccounts.onboardingUrl] = onboardingUrl
+                    it[updatedAt] = java.time.Instant.now()
+                }
             }
         }
-        PayoutAccount(stripeAccountId, payoutsEnabled = false)
     }
 }

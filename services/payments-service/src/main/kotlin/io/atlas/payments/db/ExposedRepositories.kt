@@ -46,6 +46,8 @@ private fun ResultRow.toTxRecord() = TxRecord(
     providerRef = this[Transactions.providerRef],
     idempotencyArgsHash = this[Transactions.idempotencyArgsHash],
     kind = this[Transactions.kind],
+    cardFunded = this[Transactions.cardFunded],
+    createdAt = this[Transactions.createdAt],
 )
 
 class ExposedWalletRepository : WalletRepository {
@@ -134,6 +136,7 @@ class ExposedTransactionRepository : TransactionRepository {
         providerRef: String?,
         argsHash: String?,
         kind: String,
+        cardFunded: Boolean,
     ): TxRecord = transaction {
         try {
             val id = Transactions.insert {
@@ -147,6 +150,7 @@ class ExposedTransactionRepository : TransactionRepository {
                 it[Transactions.providerRef] = providerRef
                 it[idempotencyArgsHash] = argsHash
                 it[Transactions.kind] = kind
+                it[Transactions.cardFunded] = cardFunded
                 it[createdAt] = Instant.now()
             } get Transactions.id
             Transactions.selectAll().where { Transactions.id eq id }.single().toTxRecord()
@@ -156,21 +160,55 @@ class ExposedTransactionRepository : TransactionRepository {
         }
     }
 
-    override fun markSettled(projectId: UUID, id: UUID, settledAt: Instant) {
-        transaction {
-            Transactions.update({ (Transactions.projectId eq projectId) and (Transactions.id eq id) }) {
-                it[status] = TxStatus.SETTLED
-                it[Transactions.settledAt] = settledAt
-            }
+    // Compare-and-set: each UPDATE carries the expected current status, so
+    // only one of two racing writers flips the row and sees count 1. The
+    // loser gets 0, skips the balance movement, and the money is applied
+    // exactly once no matter how many webhook deliveries arrive together.
+    override fun transitionSettled(projectId: UUID, id: UUID, settledAt: Instant): Int = transaction {
+        Transactions.update({
+            (Transactions.projectId eq projectId) and (Transactions.id eq id) and
+                (Transactions.status eq TxStatus.PENDING)
+        }) {
+            it[status] = TxStatus.SETTLED
+            it[Transactions.settledAt] = settledAt
         }
     }
 
-    override fun markRefunded(projectId: UUID, id: UUID) {
-        transaction {
-            Transactions.update({ (Transactions.projectId eq projectId) and (Transactions.id eq id) }) {
-                it[status] = TxStatus.REFUNDED
-            }
+    override fun transitionRefunded(projectId: UUID, id: UUID): Int = transaction {
+        Transactions.update({
+            (Transactions.projectId eq projectId) and (Transactions.id eq id) and
+                (Transactions.status eq TxStatus.SETTLED)
+        }) {
+            it[status] = TxStatus.REFUNDED
         }
+    }
+
+    override fun transitionFailed(projectId: UUID, id: UUID, reason: String): Int = transaction {
+        Transactions.update({
+            (Transactions.projectId eq projectId) and (Transactions.id eq id) and
+                (Transactions.status eq TxStatus.PENDING)
+        }) {
+            it[status] = TxStatus.FAILED
+        }
+    }.also {
+        // The reason is logged, not stored: no column exists for it and the
+        // provider_ref is what reconciliation actually needs.
+        if (it > 0) LOG.warn("transaction {} marked failed: {}", id, reason)
+    }
+
+    override fun transitionCancelled(projectId: UUID, id: UUID, reason: String): Int = transaction {
+        Transactions.update({
+            (Transactions.projectId eq projectId) and (Transactions.id eq id) and
+                (Transactions.status eq TxStatus.PENDING)
+        }) {
+            it[status] = TxStatus.CANCELLED
+        }
+    }.also {
+        if (it > 0) LOG.warn("transaction {} cancelled: {}", id, reason)
+    }
+
+    override fun markFailed(projectId: UUID, id: UUID, reason: String) {
+        transitionFailed(projectId, id, reason)
     }
 
     /**
@@ -188,19 +226,6 @@ class ExposedTransactionRepository : TransactionRepository {
             .orderBy(Transactions.createdAt to SortOrder.ASC)
             .limit(limit)
             .map { it.toTxRecord() }
-    }
-
-    override fun markFailed(projectId: UUID, id: UUID, reason: String) {
-        transaction {
-            Transactions.update({ (Transactions.projectId eq projectId) and (Transactions.id eq id) }) {
-                it[status] = TxStatus.FAILED
-            }
-        }
-        // The reason is logged rather than stored: payments.transactions has
-        // no column for it, and adding one to carry a provider string that
-        // is only ever read by a human is not worth a migration. The
-        // provider_ref on the row is what reconciliation actually needs.
-        LOG.warn("transaction {} marked failed: {}", id, reason)
     }
 
     private companion object {

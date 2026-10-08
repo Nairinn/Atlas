@@ -42,9 +42,10 @@ message FareEvent {
     UNKNOWN = 0;
     RIDE_ACCEPTED = 1;     // pre-authorize fare
     RIDE_COMPLETED = 2;    // settle
-    RIDE_CANCELLED = 3;    // refund if a transaction exists
+    RIDE_CANCELLED = 3;    // void a PENDING transaction, refund a SETTLED one
     TRANSACTION_SETTLED = 4;
     TRANSACTION_REFUNDED = 5;
+    TRANSACTION_CANCELLED = 6;  // hold voided before capture; no money moved
   }
 }
 

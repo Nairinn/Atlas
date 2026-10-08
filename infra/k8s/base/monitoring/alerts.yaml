@@ -108,6 +108,24 @@ spec:
               The consumer is not committing offsets, so settlement is
               stalled. Check payments-service availability.
 
+        # Webhooks that fail verification or cannot be parsed are either
+        # somebody probing the endpoint or a Stripe schema change; both
+        # need eyes, and neither surfaces anywhere else.
+        - alert: AtlasWebhooksRejected
+          expr: |
+            sum(rate(atlas_payments_webhook_total{outcome=~"bad_signature|malformed"}[15m])) > 0.1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Payments webhook endpoint is rejecting deliveries"
+            description: >-
+              Webhooks are arriving with bad signatures or unparsable
+              bodies. Bad signatures mean either a rotated signing secret
+              that Atlas has not learned, or somebody probing the
+              endpoint. Malformed bodies usually mean a Stripe event
+              shape the handler no longer recognises.
+
     # --- the front door ---------------------------------------------------
     - name: atlas.gateway
       rules:

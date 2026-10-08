@@ -56,6 +56,11 @@ class RetryingProviderTest {
             return ProviderResult(true, providerRef)
         }
 
+        override fun cancel(projectId: java.util.UUID, providerRef: String): ProviderResult =
+            ProviderResult(true, providerRef)
+
+        override fun clientSecret(projectId: java.util.UUID, providerRef: String): String? = null
+
         override fun lookup(projectId: java.util.UUID, providerRef: String): ProviderStatus {
             maybeFail(lookupCalls.incrementAndGet())
             return ProviderStatus.CAPTURED

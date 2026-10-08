@@ -3,66 +3,62 @@ package io.atlas.payments.core
 import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.time.Duration
-import java.time.Instant
 
 /**
  * Resolves transactions stuck in PENDING against the provider's own record.
  *
- * # Why a pending row is not merely untidy
+ * A transaction goes PENDING when the provider authorizes and leaves
+ * PENDING when it settles, fails, or is cancelled. If the process dies in
+ * between, the row stays PENDING and nothing retries it, because nothing
+ * knows whether retrying would be a second charge. The provider is the
+ * only source of truth, which is why [PaymentProvider.lookup] exists.
  *
- * A transaction goes PENDING the moment the provider authorizes, and
- * leaves PENDING when it settles or fails. If the process dies in between
- * — a deploy, an OOM, a provider timeout after the charge went through —
- * the row stays PENDING forever. Nothing retries it, because nothing knows
- * whether retrying would be a second charge.
- *
- * That is money in limbo: the customer may have been charged and has no
- * balance to show for it, or may not have been and is owed nothing. Both
- * look identical from inside Atlas. The only source of truth is the
- * provider, which is why [PaymentProvider.lookup] exists.
- *
- * # What it refuses to do
- *
- * When the provider says UNKNOWN — unreachable, or an answer this adapter
- * does not recognise — the sweep leaves the row alone and counts it. It
- * does NOT pick a direction. Resolving on a guess is how a reconciliation
- * job turns a temporary provider outage into a pile of wrongly-settled
- * balances, and unlike the stuck row itself, that is not recoverable by
+ * When the provider is UNKNOWN the sweep leaves the row alone and counts
+ * it: resolving on a guess is how a temporary provider outage becomes a
+ * pile of wrongly-settled balances, and that damage is not fixed by
  * running the job again later.
+ *
+ * AUTHORIZED and AWAITING_CUSTOMER rows are normal holds, not problems:
+ * they are counted separately so `AtlasPaymentsUnreconciled` fires only
+ * on money whose fate nobody knows. A hold older than [holdExpiry] is
+ * cancelled — voided at the provider — because an authorization Stripe
+ * keeps open past expiry is a bug magnet, and holds expire by themselves
+ * anyway.
  */
 class ReconciliationSweep(
     private val transactions: TransactionRepository,
-    private val wallets: WalletRepository,
+    private val applier: SettlementApplier,
     private val provider: PaymentProvider,
-    private val runner: TransactionRunner,
     private val metrics: PaymentsMetrics = PaymentsMetrics.NOOP,
     /**
-     * How long a transaction may sit PENDING before it is considered
-     * stuck.
-     *
-     * Long enough that a slow-but-healthy capture is never swept: the
-     * normal path settles in milliseconds, and the ride lifecycle that
-     * drives settlement can legitimately take minutes. Fifteen minutes is
-     * comfortably past both and still well inside the window where a
+     * How long a transaction may sit PENDING before the sweep looks at it.
+     * The ride lifecycle that drives settlement can legitimately take
+     * minutes; fifteen minutes is past that and inside the window where a
      * customer would notice.
      */
     private val stuckAfter: Duration = Duration.ofMinutes(15),
+    /**
+     * How old an authorized-but-uncaptured hold may get before the sweep
+     * cancels it. Should be shorter than the provider's own auth expiry.
+     */
+    private val holdExpiry: Duration = Duration.ofHours(6),
     private val clock: Clock = Clock.systemUTC(),
 ) {
     data class Outcome(
         val settled: Int = 0,
         val failed: Int = 0,
+        val cancelled: Int = 0,
+        /** Money whose fate nobody knows — the number worth alerting on. */
         val unresolved: Int = 0,
     ) {
-        val total: Int get() = settled + failed + unresolved
+        val total: Int get() = settled + failed + cancelled + unresolved
     }
 
     /**
-     * Run one pass. Returns what it did, so the caller can log or alert.
-     *
-     * [limit] bounds the batch: a sweep that tried to resolve a backlog of
-     * ten thousand rows in one pass would hold the provider's rate limit
-     * for minutes and time out, achieving nothing. Small batches converge.
+     * Run one pass. [limit] bounds the batch: a sweep that tried to
+     * resolve a backlog of ten thousand rows in one pass would hold the
+     * provider's rate limit for minutes and time out. Small batches
+     * converge.
      */
     fun runOnce(limit: Int = 100): Outcome {
         val cutoff = clock.instant().minus(stuckAfter)
@@ -73,41 +69,41 @@ class ReconciliationSweep(
 
         var settled = 0
         var failed = 0
+        var cancelled = 0
         var unresolved = 0
 
         for (tx in stuck) {
             // A pending transaction with no provider reference never
-            // reached the provider at all, so there is nothing to ask
-            // about and nothing was charged. Failing it is safe and is the
-            // only outcome that frees the idempotency key.
+            // reached the provider, so nothing was charged. Failing it is
+            // safe and frees the idempotency key.
             val ref = tx.providerRef
             if (ref.isNullOrBlank()) {
-                transactions.markFailed(tx.projectId, tx.id, "no provider reference")
-                failed++
+                if (transactions.transitionFailed(tx.projectId, tx.id, "no provider reference") > 0) failed++
                 continue
             }
 
             val status = try {
                 provider.lookup(tx.projectId, ref)
             } catch (e: Exception) {
-                // An exception is not evidence of anything about the
-                // charge, so it is treated exactly like UNKNOWN.
+                // An exception is not evidence about the charge; same as UNKNOWN.
                 LOG.warn("provider lookup failed for {}: {}", tx.id, e.message)
                 ProviderStatus.UNKNOWN
             }
 
             when (status) {
                 ProviderStatus.CAPTURED -> {
-                    applySettlement(tx)
-                    settled++
+                    if (applier.applySettlement(tx)) settled++
                 }
                 ProviderStatus.FAILED, ProviderStatus.NOT_FOUND -> {
-                    transactions.markFailed(tx.projectId, tx.id, "provider reports $status")
-                    failed++
+                    if (transactions.transitionFailed(tx.projectId, tx.id, "provider reports $status") > 0) failed++
                 }
-                // Still in flight: not stuck after all, just slow. Left
-                // for the next pass rather than counted as a problem.
-                ProviderStatus.AUTHORIZED -> unresolved++
+                // Still in flight: not stuck after all, just slow.
+                ProviderStatus.AUTHORIZED, ProviderStatus.AWAITING_CUSTOMER -> {
+                    if (isOlderThan(tx, holdExpiry)) {
+                        if (applier.applyCancellation(tx, "hold expired after $holdExpiry")) cancelled++
+                    }
+                    // Younger holds are normal and counted as nothing.
+                }
                 ProviderStatus.UNKNOWN -> {
                     LOG.warn(
                         "cannot resolve transaction {} (ref {}); leaving pending for a human",
@@ -119,24 +115,12 @@ class ReconciliationSweep(
         }
 
         metrics.reconciled(settled = settled, failed = failed, unresolved = unresolved)
-        return Outcome(settled, failed, unresolved)
+        return Outcome(settled, failed, cancelled, unresolved)
     }
 
-    /**
-     * Apply the balance movement the original settle would have applied.
-     *
-     * Inside one transaction with the status change, for the same reason
-     * the normal path is: a crash between moving the money and recording
-     * that it moved leaves exactly the inconsistency this whole class
-     * exists to clean up.
-     */
-    private fun applySettlement(tx: TxRecord) {
-        runner.run {
-            tx.fromWallet?.let { wallets.adjustBalance(tx.projectId, it, -tx.amountCents) }
-            tx.toWallet?.let { wallets.adjustBalance(tx.projectId, it, tx.amountCents) }
-            transactions.markSettled(tx.projectId, tx.id, clock.instant())
-        }
-        LOG.info("reconciled transaction {} as settled", tx.id)
+    private fun isOlderThan(tx: TxRecord, age: Duration): Boolean {
+        val created = tx.createdAt ?: return false
+        return created.isBefore(clock.instant().minus(age))
     }
 
     private companion object {

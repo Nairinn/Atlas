@@ -58,18 +58,22 @@ interface TransactionRepository {
         argsHash: String?,
         /** One of [TxKind]. Defaulted so transfer call sites need no change. */
         kind: String = TxKind.TRANSFER,
+        /** True when the charge carries a destination account (Connect fare). */
+        cardFunded: Boolean = false,
     ): TxRecord
-    fun markSettled(projectId: UUID, id: UUID, settledAt: Instant)
-    fun markRefunded(projectId: UUID, id: UUID)
 
     /**
-     * Mark a transaction failed.
-     *
-     * Needed by the deposit path: when the provider declines the capture
-     * of an already-recorded pending deposit, the row must not be left
-     * pending forever, where the reconciliation sweep would keep
-     * retrying a charge the provider has already refused.
+     * Compare-and-set transitions. Each returns the row count (0 or 1):
+     * the balance movement and outbox event must happen only when it is 1,
+     * in the same DB transaction as the call. This is what makes a
+     * redelivered webhook or a concurrent sweep unable to double-apply.
      */
+    fun transitionSettled(projectId: UUID, id: UUID, settledAt: Instant): Int
+    fun transitionRefunded(projectId: UUID, id: UUID): Int
+    fun transitionFailed(projectId: UUID, id: UUID, reason: String): Int
+    fun transitionCancelled(projectId: UUID, id: UUID, reason: String): Int
+
+    /** Kept for the deposit path's synchronous decline handling. */
     fun markFailed(projectId: UUID, id: UUID, reason: String)
 
     /**

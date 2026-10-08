@@ -58,9 +58,16 @@ class RetryingPaymentProvider(
     override fun lookup(projectId: java.util.UUID, providerRef: String): ProviderStatus =
         withRetries("lookup") { delegate.lookup(projectId, providerRef) }
 
+    override fun clientSecret(projectId: java.util.UUID, providerRef: String): String? =
+        withRetries("clientSecret") { delegate.clientSecret(projectId, providerRef) }
+
     /** Bounded by a timeout, but attempted once. See the class note. */
     override fun capture(projectId: java.util.UUID, providerRef: String): ProviderResult =
         withTimeout("capture") { delegate.capture(projectId, providerRef) }
+
+    /** Bounded by a timeout, but attempted once. See the class note. */
+    override fun cancel(projectId: java.util.UUID, providerRef: String): ProviderResult =
+        withTimeout("cancel") { delegate.cancel(projectId, providerRef) }
 
     /** Bounded by a timeout, but attempted once. See the class note. */
     override fun refund(projectId: java.util.UUID, providerRef: String): ProviderResult =

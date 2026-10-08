@@ -9,22 +9,22 @@ import java.util.UUID
  * Payment business logic, free of any gRPC or persistence detail.
  *
  * The money-moving invariant: every transaction state change writes a
- * [FareEvent] to the outbox in the SAME [TransactionRunner.run] block as the
- * wallet and transaction mutations, so the event and the state change commit
- * atomically. The background dispatcher later drains the outbox to Kafka.
+ * [atlas.events.FareEvent] to the outbox in the SAME [TransactionRunner.run]
+ * block as the wallet and transaction mutations, so the event and the
+ * state change commit atomically. The background dispatcher later drains
+ * the outbox to Kafka.
  *
- * Provider calls (authorize/capture/refund) happen OUTSIDE the transaction:
- * network I/O must never hold a Postgres row lock.
+ * Provider calls happen OUTSIDE the transaction: network I/O must never
+ * hold a Postgres row lock.
  *
  * Lifecycle:
- *   Deposit             -> provider.authorize + capture, credit wallet, TRANSACTION_SETTLED
- *   InitiateTransaction -> provider.authorize, pending tx, RIDE_ACCEPTED event
- *   SettleTransaction   -> provider.capture, move balances, TRANSACTION_SETTLED
- *   RefundTransaction   -> provider.refund, reverse balances, TRANSACTION_REFUNDED
+ *   Deposit    -> provider.authorize + capture, credit wallet, TRANSACTION_SETTLED
+ *   Initiate   -> provider.authorize, pending tx, client_secret to the caller
+ *   Settle     -> provider.capture, apply via SettlementApplier
+ *   Refund     -> provider.refund on SETTLED; provider.cancel on PENDING
  *
- * Deposit is the only way money enters the system. Without it every wallet
- * sits at zero and [settle] refuses to move funds that are not there, which
- * made the whole service unusable end to end.
+ * Under Stripe Connect a card-funded fare never debits the payer's wallet
+ * (D2): the card pays, the wallet mirrors.
  */
 class PaymentsService(
     private val wallets: WalletRepository,
@@ -44,8 +44,11 @@ class PaymentsService(
     private val clock: Clock = Clock.systemUTC(),
     private val metrics: PaymentsMetrics = PaymentsMetrics.NOOP,
 ) {
+    private val applier =
+        SettlementApplier(wallets, transactions, runner, outbox, fareTopic, clock)
+
     data class DepositResult(val transactionId: UUID, val status: String, val balanceCents: Long)
-    data class InitiateResult(val transactionId: UUID, val status: String)
+    data class InitiateResult(val transactionId: UUID, val status: String, val clientSecret: String?)
     data class SettleResult(val success: Boolean, val status: String)
     data class RefundResult(val success: Boolean)
     data class WalletBalance(val balanceCents: Long, val currency: String)
@@ -53,24 +56,12 @@ class PaymentsService(
     /**
      * Add funds to a user's wallet from an external payment method.
      *
-     * # Ordering, and the window it leaves open
-     *
-     * The sequence is: authorize -> record a pending row -> capture ->
+     * The sequence is authorize -> record a pending row -> capture ->
      * credit and settle. The pending row is written BEFORE the capture on
-     * purpose. Capture is the step that actually takes the customer's
-     * money, so if the process dies immediately afterwards the row is
-     * already on disk with its `provider_ref`, and a sweep over pending
-     * deposits (indexed for exactly this in migration 0033) can ask the
-     * provider what happened and finish the job.
-     *
-     * Reversing the order — capture first, then write — would lose that:
-     * a crash would leave a charged card and no record of it anywhere in
-     * this system. Money taken with no trace is the one outcome worth
-     * contorting the code to avoid.
-     *
-     * The remaining window is small and recoverable rather than absent,
-     * which is the honest position for a system that has to call a
-     * network service and write a database in two separate steps.
+     * purpose: capture is the step that takes the customer's money, so a
+     * crash right after it leaves a row on disk with its provider_ref for
+     * the sweep to finish against. Capture-first would leave a charged
+     * card with no record of it anywhere.
      */
     fun deposit(
         projectId: UUID,
@@ -82,13 +73,10 @@ class PaymentsService(
         if (idempotencyKey.isBlank()) throw PaymentError.InvalidArgument("idempotency_key is required")
         val userUuid = parseUuid(userId, "user_id")
 
-        // A deposit has no counterparty and no ride, so the hash covers the
-        // payee and the amount. Reusing a key with a different amount is a
-        // conflict, not a silent success returning the wrong transaction.
-        val argsHash = idempotencyArgsHash(userId, "", amountCents, "")
+        val argsHash = idempotencyArgsHash(userId, "", amountCents, "", 0)
 
         transactions.findByIdempotencyKey(projectId, idempotencyKey)?.let { existing ->
-            if (existing.idempotencyArgsHash != argsHash) {
+            if (!idempotencyArgsMatch(existing.idempotencyArgsHash, userId, "", amountCents, "", 0)) {
                 throw PaymentError.IdempotencyConflict(idempotencyKey)
             }
             return DepositResult(
@@ -103,9 +91,6 @@ class PaymentsService(
                 projectId = projectId,
                 userId = userUuid,
                 amountCents = amountCents,
-                // No destination and no fee: a deposit pays nobody but the
-                // depositor, and the tenant has not yet earned a cut of
-                // money the user just put in.
             ),
             idempotencyKey,
         )
@@ -116,8 +101,6 @@ class PaymentsService(
                 val wallet = wallets.getOrCreateByUser(projectId, userUuid)
                 transactions.insertPending(
                     projectId,
-                    // No source wallet: this money comes from outside the
-                    // platform. That is what makes it a deposit.
                     fromWallet = null,
                     toWallet = wallet.id,
                     amountCents = amountCents,
@@ -130,7 +113,7 @@ class PaymentsService(
             }
         } catch (e: DuplicateIdempotencyKey) {
             val winner = transactions.findByIdempotencyKey(projectId, idempotencyKey) ?: throw e
-            if (winner.idempotencyArgsHash != argsHash) {
+            if (!idempotencyArgsMatch(winner.idempotencyArgsHash, userId, "", amountCents, "", 0)) {
                 throw PaymentError.IdempotencyConflict(idempotencyKey)
             }
             return DepositResult(winner.id, winner.status, walletBalance(projectId, userId).balanceCents)
@@ -138,9 +121,8 @@ class PaymentsService(
 
         val capture = provider.capture(projectId, auth.providerRef)
         if (!capture.success) {
-            // The charge was refused, so leaving the row pending would have
-            // the reconciliation sweep retry a capture the provider has
-            // already declined.
+            // The charge was refused; leaving the row pending would have
+            // the sweep retry a capture the provider already declined.
             transactions.markFailed(projectId, pending.id, capture.message ?: "capture declined")
             metrics.depositFailed()
             throw PaymentError.ProviderDeclined(capture.message ?: "capture declined")
@@ -149,16 +131,14 @@ class PaymentsService(
         val balance = runner.run {
             val walletId = pending.toWallet
                 ?: throw PaymentError.InvalidState("deposit has no destination wallet")
+            if (transactions.transitionSettled(projectId, pending.id, clock.instant()) == 0) {
+                // A concurrent delivery (webhook or sweep) already settled.
+                return@run wallets.findById(projectId, walletId)?.balanceCents ?: amountCents
+            }
             wallets.adjustBalance(projectId, walletId, amountCents)
-            transactions.markSettled(projectId, pending.id, clock.instant())
             outbox.enqueue(
                 pending.id,
                 fareTopic,
-                // No ride is involved, so ride_id is empty. The event type is
-                // TRANSACTION_SETTLED rather than a new one: consumers already
-                // treat that as an audit record, and adding an enum value
-                // would force every consumer to redeploy before deposits
-                // could ship.
                 fareEvent(projectId, "", pending.id, FareEvent.EventType.TRANSACTION_SETTLED, amountCents),
             )
             wallets.findById(projectId, walletId)?.balanceCents ?: amountCents
@@ -183,8 +163,7 @@ class PaymentsService(
             throw PaymentError.InvalidArgument("application_fee_cents must not be negative")
         }
         // A fee taken out of the amount must leave the payee something;
-        // Stripe rejects fee >= amount, and the error it returns names
-        // Stripe internals this API does not expose.
+        // Stripe rejects fee >= amount.
         if (applicationFeeCents >= amountCents) {
             throw PaymentError.InvalidArgument(
                 "application_fee_cents ($applicationFeeCents) must be less than amount_cents ($amountCents)",
@@ -197,30 +176,31 @@ class PaymentsService(
             throw PaymentError.InvalidArgument("from_user_id and to_user_id must differ")
         }
         val rideUuid = if (rideId.isBlank()) null else parseUuid(rideId, "ride_id")
-        val argsHash = idempotencyArgsHash(fromUserId, toUserId, amountCents, rideId)
+        val argsHash = idempotencyArgsHash(fromUserId, toUserId, amountCents, rideId, applicationFeeCents)
 
-        // Idempotent replay: same key + same args returns the existing tx.
         transactions.findByIdempotencyKey(projectId, idempotencyKey)?.let { existing ->
-            if (existing.idempotencyArgsHash != argsHash) {
+            if (!idempotencyArgsMatch(
+                    existing.idempotencyArgsHash, fromUserId, toUserId, amountCents, rideId, applicationFeeCents,
+                )
+            ) {
                 throw PaymentError.IdempotencyConflict(idempotencyKey)
             }
-            return InitiateResult(existing.id, existing.status)
+            return InitiateResult(existing.id, existing.status, clientSecretFor(existing))
         }
 
-        // Authorize against the provider BEFORE opening the db transaction.
+        // Resolve the destination BEFORE authorizing. When Connect
+        // onboarding is wired, a payee with no usable account is an error
+        // the caller must fix before a charge is placed — not a plain
+        // charge the provider would happily take money for.
+        val destination = destinationAccountOf(projectId, toUuid)
+            ?: if (payoutAccounts != null) throw PaymentError.DriverNotOnboarded(toUuid) else null
+
         val auth = provider.authorize(
             ChargeRequest(
                 projectId = projectId,
                 userId = fromUuid,
                 amountCents = amountCents,
-                // The payee's connected account is what makes this a
-                // Connect destination charge rather than a plain transfer:
-                // the tenant's Stripe account charges the rider, Stripe
-                // moves the driver's share to the destination, and the
-                // application fee stays with the tenant. Both are resolved
-                // by the provider from the project — the service does not
-                // know they are Stripe concepts.
-                destinationAccountId = destinationAccountOf(projectId, toUuid),
+                destinationAccountId = destination,
                 applicationFeeCents = applicationFeeCents.takeIf { it > 0 },
             ),
             idempotencyKey,
@@ -240,6 +220,7 @@ class PaymentsService(
                     rideId = rideUuid,
                     providerRef = auth.providerRef,
                     argsHash = argsHash,
+                    cardFunded = destination != null,
                 )
                 outbox.enqueue(
                     record.id,
@@ -249,18 +230,20 @@ class PaymentsService(
                 record.id
             }
         } catch (e: DuplicateIdempotencyKey) {
-            // Lost a race with a concurrent identical request. The duplicate-key
-            // violation rolled the whole transaction back, so we re-read the
-            // winner in a FRESH transaction (the aborted one cannot run queries).
+            // Lost a race with a concurrent identical request; re-read the
+            // winner in a FRESH transaction (the aborted one cannot query).
             val winner = transactions.findByIdempotencyKey(projectId, idempotencyKey)
                 ?: throw e
-            if (winner.idempotencyArgsHash != argsHash) {
+            if (!idempotencyArgsMatch(
+                    winner.idempotencyArgsHash, fromUserId, toUserId, amountCents, rideId, applicationFeeCents,
+                )
+            ) {
                 throw PaymentError.IdempotencyConflict(idempotencyKey)
             }
-            return InitiateResult(winner.id, winner.status)
+            return InitiateResult(winner.id, winner.status, clientSecretFor(winner))
         }
         metrics.transactionInitiated()
-        return InitiateResult(txId, TxStatus.PENDING)
+        return InitiateResult(txId, TxStatus.PENDING, auth.clientSecret)
     }
 
     fun settle(projectId: UUID, transactionId: String): SettleResult {
@@ -273,25 +256,26 @@ class PaymentsService(
             else -> throw PaymentError.InvalidState("cannot settle a ${tx.status} transaction")
         }
 
+        // Deposit-funded transfers: verify the balance BEFORE any provider
+        // call, under the row lock the settle transaction takes. Card-funded
+        // fares skip this; the card pays (D2).
+        if (!tx.cardFunded && tx.fromWallet != null) {
+            runner.run {
+                val fromWallet = wallets.findById(projectId, tx.fromWallet!!)
+                    ?: throw PaymentError.InvalidState("source wallet not found")
+                if (fromWallet.balanceCents < tx.amountCents) {
+                    throw PaymentError.InsufficientFunds(fromWallet.id)
+                }
+            }
+        }
+
         val capture = provider.capture(projectId, tx.providerRef ?: "")
         if (!capture.success) throw PaymentError.ProviderDeclined(capture.message ?: "capture declined")
 
-        runner.run {
-            val fromWalletId = tx.fromWallet
-                ?: throw PaymentError.InvalidState("transaction has no source wallet")
-            val fromWallet = wallets.findById(projectId, fromWalletId)
-                ?: throw PaymentError.InvalidState("source wallet not found")
-            if (fromWallet.balanceCents < tx.amountCents) {
-                throw PaymentError.InsufficientFunds(fromWallet.id)
-            }
-            wallets.adjustBalance(projectId, fromWalletId, -tx.amountCents)
-            tx.toWallet?.let { wallets.adjustBalance(projectId, it, tx.amountCents) }
-            transactions.markSettled(projectId, txUuid, clock.instant())
-            outbox.enqueue(
-                txUuid,
-                fareTopic,
-                fareEvent(projectId, rideRef(tx), txUuid, FareEvent.EventType.TRANSACTION_SETTLED, tx.amountCents),
-            )
+        if (!applier.applySettlement(tx)) {
+            // A webhook or the sweep settled it between our read and the
+            // CAS. Not an error: the money moved exactly once.
+            return SettleResult(true, TxStatus.SETTLED)
         }
         metrics.transactionSettled()
         return SettleResult(true, TxStatus.SETTLED)
@@ -301,27 +285,43 @@ class PaymentsService(
         val txUuid = parseUuid(transactionId, "transaction_id")
         val tx = transactions.findById(projectId, txUuid)
             ?: throw PaymentError.TransactionNotFound(transactionId)
-        when (tx.status) {
-            TxStatus.REFUNDED -> return RefundResult(true) // idempotent
-            TxStatus.SETTLED -> Unit
-            else -> throw PaymentError.InvalidState("can only refund a settled transaction; status=${tx.status}")
-        }
-
-        val refund = provider.refund(projectId, tx.providerRef ?: "")
-        if (!refund.success) throw PaymentError.ProviderDeclined(refund.message ?: "refund declined")
-
-        runner.run {
-            // Reverse the settle: money flows back from payee to payer.
-            tx.fromWallet?.let { wallets.adjustBalance(projectId, it, tx.amountCents) }
-            tx.toWallet?.let { wallets.adjustBalance(projectId, it, -tx.amountCents) }
-            transactions.markRefunded(projectId, txUuid)
-            outbox.enqueue(
-                txUuid,
-                fareTopic,
-                fareEvent(projectId, rideRef(tx), txUuid, FareEvent.EventType.TRANSACTION_REFUNDED, tx.amountCents),
+        return when (tx.status) {
+            TxStatus.REFUNDED -> RefundResult(true) // idempotent
+            TxStatus.SETTLED -> refundSettled(tx)
+            TxStatus.PENDING -> cancelPending(tx)
+            else -> throw PaymentError.InvalidState(
+                "cannot refund a ${tx.status} transaction",
             )
         }
+    }
+
+    /** SETTLED -> REFUNDED: reverse the captured money. */
+    private fun refundSettled(tx: TxRecord): RefundResult {
+        val refund = provider.refund(tx.projectId, tx.providerRef ?: "")
+        if (!refund.success) throw PaymentError.ProviderDeclined(refund.message ?: "refund declined")
+        if (!applier.applyRefund(tx)) {
+            // Concurrent delivery already reversed it.
+            return RefundResult(true)
+        }
         metrics.transactionRefunded()
+        return RefundResult(true)
+    }
+
+    /**
+     * PENDING -> CANCELLED: the ride died before capture, so nothing was
+     * taken. The provider call voids the authorization, releasing the hold.
+     */
+    private fun cancelPending(tx: TxRecord): RefundResult {
+        tx.providerRef?.takeIf { it.isNotBlank() }?.let { ref ->
+            val cancel = provider.cancel(tx.projectId, ref)
+            if (!cancel.success) {
+                throw PaymentError.ProviderDeclined(cancel.message ?: "cancel declined")
+            }
+        }
+        if (!applier.applyCancellation(tx, "ride cancelled before capture")) {
+            return RefundResult(true)
+        }
+        metrics.transactionCancelled()
         return RefundResult(true)
     }
 
@@ -356,15 +356,10 @@ class PaymentsService(
 
     /**
      * Create (or resume) the caller's connected payout account and return
-     * Stripe's hosted onboarding URL.
-     *
-     * The Stripe call happens BEFORE any database write, deliberately:
-     * the network side effects are idempotent in the worst direction. If
-     * the process dies after creating the account at Stripe but before
-     * saving the row, the next call re-creates — Connect treats a second
-     * create for the same user as a new account, which wastes nothing but
-     * an unused Stripe account row. The reverse order (row first) would
-     * leave a row pointing at nothing, which authorize would then trust.
+     * Stripe's hosted onboarding URL. The Stripe call happens BEFORE any
+     * database write: a crash between the two orphans an unused Stripe
+     * account, while the reverse order would leave a row pointing at an
+     * account Stripe never made.
      */
     fun startConnectOnboarding(projectId: UUID, userId: String, returnUrl: String): String {
         val uuid = parseUuid(userId, "user_id")
@@ -380,14 +375,24 @@ class PaymentsService(
     // --- helpers ----------------------------------------------------------
 
     /**
+     * The stored client_secret for a replayed initiation. None for rows
+     * created before client-side confirmation existed.
+     */
+    private fun clientSecretFor(tx: TxRecord): String? {
+        if (tx.providerRef.isNullOrBlank()) return null
+        return try {
+            provider.clientSecret(tx.projectId, tx.providerRef)
+        } catch (e: Exception) {
+            LOG.warn("could not re-fetch client_secret for {}: {}", tx.id, e.message)
+            null
+        }
+    }
+
+    /**
      * The payee's connected payout account, when Connect onboarding is
-     * wired. A provider that is not Connect-aware (the fake) needs no
-     * destination: null means "plain charge", which is correct for it.
-     *
-     * A real payee with NO account is NOT null-able here — the caller has
-     * named a recipient who cannot be paid, and the provider will refuse
-     * with DriverNotOnboarded rather than charging the payer for a ride
-     * that can never be settled.
+     * wired. Null means "no destination" — a plain charge, which is
+     * correct for the fake provider; with a real payout source the
+     * caller has already turned a missing account into DriverNotOnboarded.
      */
     private fun destinationAccountOf(projectId: UUID, toUuid: UUID): String? {
         val accounts = payoutAccounts ?: return null
@@ -396,14 +401,6 @@ class PaymentsService(
         return account.stripeAccountId
     }
 
-    private fun rideRef(tx: TxRecord): String = tx.rideId?.toString() ?: ""
-
-    /**
-     * The event carries its project because the consumer reading it has no
-     * other way to learn one: it runs asynchronously, long after the
-     * request that produced the event is gone, so there is no header and
-     * no token left to derive it from.
-     */
     private fun fareEvent(
         projectId: UUID,
         rideId: String,

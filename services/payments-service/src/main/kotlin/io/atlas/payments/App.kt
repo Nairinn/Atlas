@@ -7,6 +7,7 @@ import io.atlas.payments.core.PerProjectPaymentProvider
 import io.atlas.payments.core.ReconciliationSweep
 import io.atlas.payments.core.RetryingPaymentProvider
 import io.atlas.payments.core.PaymentsService
+import io.atlas.payments.core.SettlementApplier
 import io.atlas.payments.core.StaticPaymentConfigSource
 import io.atlas.payments.core.StripeWebhookHandler
 import io.atlas.payments.crypto.ConfigCipher
@@ -90,9 +91,7 @@ fun main() {
         if (config.paymentConfigEncKey != null) {
             StripeOnboarding(
                 configs = configSource,
-                // Persist after the network call succeeds — see the class
-                // note for why that order is the safe one.
-                store = payoutSource::saveOnboarding,
+                accounts = payoutSource,
                 apiBase = config.stripeApiBase,
             )
         } else {
@@ -108,7 +107,6 @@ fun main() {
         if (config.paymentConfigEncKey != null) {
             StripePaymentProvider(
                 configs = configSource,
-                payoutAccounts = payoutSource,
                 apiBase = config.stripeApiBase,
             )
         } else {
@@ -164,14 +162,22 @@ fun main() {
         .addService(health.service)
         .build()
 
-    val httpServer = startHttpServer(config.httpPort, registry, provider) { projectId, eventType, body ->
+    // One settlement implementation for the RPC path, the webhook, and
+    // the reconciliation sweep — the drift item the audit called out.
+    val settlementApplier = SettlementApplier(
+        wallets = wallets,
+        transactions = transactions,
+        runner = runner,
+        outbox = outboxStore,
+        fareTopic = config.fareTopic,
+        clock = Clock.systemUTC(),
+    )
+
+    val httpServer = startHttpServer(config.httpPort, registry, provider, metrics) { projectId, eventType, body ->
         StripeWebhookHandler(
             projectId = projectId,
             transactions = transactions,
-            wallets = wallets,
-            runner = runner,
-            outbox = outboxStore,
-            fareTopic = config.fareTopic,
+            applier = settlementApplier,
             payoutAccounts = payoutSource,
         ).handle(eventType, body)
     }
@@ -185,9 +191,8 @@ fun main() {
     // fixes are, by definition, ones nobody is watching.
     val reconciliation = ReconciliationSweep(
         transactions = transactions,
-        wallets = wallets,
+        applier = settlementApplier,
         provider = provider,
-        runner = runner,
         metrics = metrics,
     )
     val reconciler = Executors.newSingleThreadScheduledExecutor { r ->
@@ -199,8 +204,8 @@ fun main() {
                 val outcome = reconciliation.runOnce()
                 if (outcome.total > 0) {
                     LOG.info(
-                        "reconciliation: settled={} failed={} unresolved={}",
-                        outcome.settled, outcome.failed, outcome.unresolved,
+                        "reconciliation: settled={} failed={} cancelled={} unresolved={}",
+                        outcome.settled, outcome.failed, outcome.cancelled, outcome.unresolved,
                     )
                 }
             } catch (e: Exception) {

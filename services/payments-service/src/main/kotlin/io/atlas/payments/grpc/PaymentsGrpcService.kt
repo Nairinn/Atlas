@@ -70,6 +70,9 @@ class PaymentsGrpcService(
         return TransactionResponse.newBuilder()
             .setTransactionId(result.transactionId.toString())
             .setStatus(result.status)
+            // The app's client needs this to confirm the payment with
+            // Stripe's client SDK (D1); the server only captures.
+            .setClientSecret(result.clientSecret ?: "")
             .build()
     }
 

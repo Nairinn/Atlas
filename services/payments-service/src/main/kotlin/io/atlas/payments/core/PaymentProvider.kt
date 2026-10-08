@@ -78,8 +78,21 @@ interface PaymentProvider {
     /** Capture a previously authorized charge. */
     fun capture(projectId: UUID, providerRef: String): ProviderResult
 
+    /**
+     * Void a previously authorized charge before capture. Releases the
+     * hold; no money moved, so no balances follow.
+     */
+    fun cancel(projectId: UUID, providerRef: String): ProviderResult
+
     /** Reverse a captured charge. */
     fun refund(projectId: UUID, providerRef: String): ProviderResult
+
+    /**
+     * Re-fetch the client_secret for an existing charge, so an idempotent
+     * replay of initiate can still hand the caller what the first call
+     * returned. Null when the provider does not use client confirmation.
+     */
+    fun clientSecret(projectId: UUID, providerRef: String): String?
 
     /**
      * Ask the provider what actually happened to a charge.
@@ -127,6 +140,13 @@ enum class ProviderStatus {
     /** Authorized but not captured. Still in flight. */
     AUTHORIZED,
 
+    /**
+     * Authorized and awaiting the customer's confirmation in the client
+     * (D1). Not terminal and not broken: the row is doing exactly what
+     * the flow says. The sweep leaves these alone until hold expiry.
+     */
+    AWAITING_CUSTOMER,
+
     /** Money was taken. */
     CAPTURED,
 
@@ -143,6 +163,13 @@ enum class ProviderStatus {
 data class ProviderResult(
     val success: Boolean,
     val providerRef: String,
+    /**
+     * For authorize under client-side confirmation (D1): the
+     * PaymentIntent's client_secret the app's client needs to complete
+     * the payment with Stripe's client SDK. Null when the flow does not
+     * use one (fake provider, capture-only flows).
+     */
+    val clientSecret: String? = null,
     val message: String? = null,
 )
 
@@ -157,7 +184,7 @@ data class ProviderResult(
  * behaviour for every tenant, which is precisely the property that makes
  * it unsafe anywhere but local dev.
  */
-class FakePaymentProvider : PaymentProvider {
+open class FakePaymentProvider : PaymentProvider {
     override val name: String = "fake"
 
     override fun authorize(request: ChargeRequest, idempotencyKey: String): ProviderResult =
@@ -166,19 +193,23 @@ class FakePaymentProvider : PaymentProvider {
     override fun capture(projectId: UUID, providerRef: String): ProviderResult =
         ProviderResult(success = true, providerRef = providerRef)
 
+    override fun cancel(projectId: UUID, providerRef: String): ProviderResult =
+        ProviderResult(success = true, providerRef = providerRef)
+
     override fun refund(projectId: UUID, providerRef: String): ProviderResult =
         ProviderResult(success = true, providerRef = providerRef)
 
+    override fun clientSecret(projectId: UUID, providerRef: String): String? = null
+
     /**
-     * Reports CAPTURED for anything it minted.
-     *
-     * The fake never loses a charge, so reconciliation against it always
-     * resolves cleanly. That is fine for exercising the sweep's mechanics
-     * and useless for exercising its judgement — which is why the sweep's
-     * tests drive a provider they control rather than this one.
+     * "requires_confirmation" is the honest value for the D1 flow: the
+     * fake's authorize returned success but the client never confirmed,
+     * so a PENDING row swept here is awaiting the customer, not broken.
+     * Fine for exercising the sweep's mechanics; the sweep's judgement
+     * tests drive a provider they control instead.
      */
     override fun lookup(projectId: UUID, providerRef: String): ProviderStatus =
-        if (providerRef.startsWith("fake_")) ProviderStatus.CAPTURED
+        if (providerRef.startsWith("fake_")) ProviderStatus.AWAITING_CUSTOMER
         else ProviderStatus.NOT_FOUND
 
     /**

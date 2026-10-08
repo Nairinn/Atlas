@@ -17,9 +17,10 @@ import java.util.UUID
  * | RIDE_CANCELLED       | RefundTransaction               |
  * | TRANSACTION_SETTLED  | audit only                      |
  * | TRANSACTION_REFUNDED | audit only                      |
+ * | TRANSACTION_CANCELLED | audit only                     |
  *
- * The two TRANSACTION_* rows are the important ones. Payments publishes
- * those itself from inside `settle` and `refund`, onto the same topic
+ * The TRANSACTION_* rows are the important ones. Payments publishes
+ * them itself from inside settle/refund/cancel, onto the same topic
  * this consumer reads. Treating them as instructions would mean settling
  * in response to having settled — an infinite loop through Kafka. They
  * are acknowledgements, so they are only ever recorded.
@@ -91,10 +92,10 @@ class FareEventHandler(
                     }
 
                 is CommandResult.Rejected ->
-                    // Expected in normal operation: cancelling a ride whose
-                    // transaction is still PENDING cannot be refunded,
-                    // because there is nothing captured to reverse. Record
-                    // it and let the offset advance — retrying cannot help.
+                    // Rare now that payments cancels PENDING rows on
+                    // RIDE_CANCELLED: a rejection means a state the
+                    // command does not cover. Record it and let the
+                    // offset advance — retrying cannot help.
                 {
                     LOG.info(
                         "payments rejected {} for transaction {}: {}",
@@ -176,6 +177,7 @@ class FareEventHandler(
             FareEvent.EventType.RIDE_ACCEPTED,
             FareEvent.EventType.TRANSACTION_SETTLED,
             FareEvent.EventType.TRANSACTION_REFUNDED,
+            FareEvent.EventType.TRANSACTION_CANCELLED,
             FareEvent.EventType.UNKNOWN,
             FareEvent.EventType.UNRECOGNIZED,
             -> false

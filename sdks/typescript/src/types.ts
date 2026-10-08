@@ -195,6 +195,12 @@ export interface CreateTransactionParams {
 
 export interface Transaction {
   transactionId: string;
-  /** "pending" | "settled" | "failed" | "refunded" */
+  /**
+   * The processor's client_secret under the client-side-confirmation
+   * flow: present it to the processor's client SDK to complete the
+   * payment. Absent when the flow does not use one.
+   */
+  clientSecret?: string;
+  /** "pending" | "settled" | "failed" | "refunded" | "cancelled" */
   status: string;
 }

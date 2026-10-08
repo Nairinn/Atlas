@@ -9,6 +9,7 @@ interface PaymentsMetrics {
     fun transactionInitiated()
     fun transactionSettled()
     fun transactionRefunded()
+    fun transactionCancelled()
     fun outboxDispatched(count: Int)
 
     /**
@@ -29,15 +30,24 @@ interface PaymentsMetrics {
      */
     fun depositFailed()
 
+    /**
+     * A processed webhook event. `outcome` is applied | ignored |
+     * malformed | bad_signature — the last two are what an alert watches.
+     * No project label, to keep cardinality bounded.
+     */
+    fun webhookProcessed(outcome: String)
+
     companion object {
         val NOOP: PaymentsMetrics = object : PaymentsMetrics {
             override fun transactionInitiated() {}
             override fun transactionSettled() {}
             override fun transactionRefunded() {}
+            override fun transactionCancelled() {}
             override fun outboxDispatched(count: Int) {}
             override fun reconciled(settled: Int, failed: Int, unresolved: Int) {}
             override fun depositSettled() {}
             override fun depositFailed() {}
+            override fun webhookProcessed(outcome: String) {}
         }
     }
 }

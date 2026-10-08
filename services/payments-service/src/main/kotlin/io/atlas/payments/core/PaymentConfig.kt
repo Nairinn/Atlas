@@ -106,8 +106,14 @@ class PerProjectPaymentProvider(
     override fun capture(projectId: UUID, providerRef: String): ProviderResult =
         forProject(projectId).capture(projectId, providerRef)
 
+    override fun cancel(projectId: UUID, providerRef: String): ProviderResult =
+        forProject(projectId).cancel(projectId, providerRef)
+
     override fun refund(projectId: UUID, providerRef: String): ProviderResult =
         forProject(projectId).refund(projectId, providerRef)
+
+    override fun clientSecret(projectId: UUID, providerRef: String): String? =
+        forProject(projectId).clientSecret(projectId, providerRef)
 
     override fun lookup(projectId: UUID, providerRef: String): ProviderStatus =
         forProject(projectId).lookup(projectId, providerRef)

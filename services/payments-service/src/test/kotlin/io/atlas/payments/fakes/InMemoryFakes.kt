@@ -118,6 +118,7 @@ class InMemoryTransactionRepository : TransactionRepository {
         providerRef: String?,
         argsHash: String?,
         kind: String,
+        cardFunded: Boolean,
     ): TxRecord {
         if (keyToId.containsKey(projectId to idempotencyKey)) {
             throw DuplicateIdempotencyKey(idempotencyKey)
@@ -134,22 +135,39 @@ class InMemoryTransactionRepository : TransactionRepository {
             providerRef = providerRef,
             idempotencyArgsHash = argsHash,
             kind = kind,
+            cardFunded = cardFunded,
         )
         byId[projectId to record.id] = record
         keyToId[projectId to idempotencyKey] = record.id
         createdAt[record.id] = Instant.now()
-        return record
+        return record.copy(createdAt = createdAt[record.id])
+    }
+
+    // CAS like the Exposed one: only a row in [expected] flips, and the
+    // return count tells the caller whether it won.
+    @Synchronized
+    private fun transition(projectId: UUID, id: UUID, expected: String, to: String): Int {
+        val record = byId[projectId to id] ?: return 0
+        if (record.status != expected) return 0
+        byId[projectId to id] = record.copy(status = to)
+        return 1
     }
 
     @Synchronized
-    override fun markSettled(projectId: UUID, id: UUID, settledAt: Instant) {
-        byId[projectId to id] = byId.getValue(projectId to id).copy(status = TxStatus.SETTLED)
-    }
+    override fun transitionSettled(projectId: UUID, id: UUID, settledAt: Instant): Int =
+        transition(projectId, id, TxStatus.PENDING, TxStatus.SETTLED)
 
     @Synchronized
-    override fun markRefunded(projectId: UUID, id: UUID) {
-        byId[projectId to id] = byId.getValue(projectId to id).copy(status = TxStatus.REFUNDED)
-    }
+    override fun transitionRefunded(projectId: UUID, id: UUID): Int =
+        transition(projectId, id, TxStatus.SETTLED, TxStatus.REFUNDED)
+
+    @Synchronized
+    override fun transitionFailed(projectId: UUID, id: UUID, reason: String): Int =
+        transition(projectId, id, TxStatus.PENDING, TxStatus.FAILED)
+
+    @Synchronized
+    override fun transitionCancelled(projectId: UUID, id: UUID, reason: String): Int =
+        transition(projectId, id, TxStatus.PENDING, TxStatus.CANCELLED)
 
     /** When each transaction was created, for the reconciliation sweep. */
     private val createdAt = linkedMapOf<UUID, Instant>()
@@ -161,9 +179,35 @@ class InMemoryTransactionRepository : TransactionRepository {
      * fifteen minutes, and a clock-injected repository would be a larger
      * fake than the thing it stands in for.
      */
+    /**
+     * Point a stored transaction at a fixture's provider ref, so webhook
+     * tests can use real-shaped pi_ ids without a real provider.
+     */
+    @Synchronized
+    fun overrideProviderRef(id: UUID, providerRef: String) {
+        byId.entries
+            .filter { it.key.second == id }
+            .forEach { (k, v) -> byId[k] = v.copy(providerRef = providerRef) }
+    }
+
+    /**
+     * Age a row's idempotency hash to the v1 (pre-fee) format, to test
+     * that stored legacy rows still replay.
+     */
+    @Synchronized
+    fun ageToLegacyHash(id: UUID, fromUserId: String, toUserId: String, amountCents: Long) {
+        val legacy = io.atlas.payments.core.sha256Hex("$fromUserId|$toUserId|$amountCents|")
+        byId.entries
+            .filter { it.key.second == id }
+            .forEach { (k, v) -> byId[k] = v.copy(idempotencyArgsHash = legacy) }
+    }
+
     @Synchronized
     fun backdate(id: UUID, at: Instant) {
         createdAt[id] = at
+        byId.entries
+            .filter { it.key.second == id }
+            .forEach { (k, v) -> byId[k] = v.copy(createdAt = at) }
     }
 
     @Synchronized
@@ -176,7 +220,7 @@ class InMemoryTransactionRepository : TransactionRepository {
 
     @Synchronized
     override fun markFailed(projectId: UUID, id: UUID, reason: String) {
-        byId[projectId to id] = byId.getValue(projectId to id).copy(status = TxStatus.FAILED)
+        transition(projectId, id, TxStatus.PENDING, TxStatus.FAILED)
     }
 }
 
