@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         cfg.sweep_interval,
         cfg.sweep_batch_size,
+        cfg.safety_vote_horizon,
     ));
 
     let kafka = consumer::build(&cfg.kafka_brokers, &cfg.consumer_group)

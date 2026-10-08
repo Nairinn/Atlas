@@ -28,6 +28,13 @@ import java.util.concurrent.TimeUnit
 interface AuthTokenEventPublisher {
     fun publishIssued(claims: TokenClaims, rawToken: String)
     fun publishRevoked(claims: TokenClaims, rawToken: String)
+
+    /**
+     * Every session for [userId] is gone (password reset). Peers cannot
+     * know the tokens' hashes, so the event is user-scoped; the consumer
+     * evicts the whole user.
+     */
+    fun publishUserRevoked(userId: java.util.UUID)
     fun close()
 }
 
@@ -79,6 +86,27 @@ class AuthTokenProducer(
 
     override fun publishRevoked(claims: TokenClaims, rawToken: String) {
         publish(claims, rawToken, AuthTokenEvent.EventType.REVOKED)
+    }
+
+    override fun publishUserRevoked(userId: java.util.UUID) {
+        // An empty token_hash is the user-wide marker: the consumer sees
+        // no hash to evict by and evicts the user instead.
+        val event = AuthTokenEvent.newBuilder()
+            .setUserId(userId.toString())
+            .setEventType(AuthTokenEvent.EventType.REVOKED)
+            .setOccurredAt(clock.instant().epochSecond)
+            .build()
+        val record = ProducerRecord(topic, userId.toString(), event.toByteArray())
+        try {
+            dispatcher.execute { producer.send(record) { _, exception ->
+                if (exception != null) {
+                    LOG.warn("failed to publish user-wide revocation userId={}", userId, exception)
+                    metrics.tokenEventPublishFailed("delivery")
+                }
+            } }
+        } catch (e: Exception) {
+            metrics.tokenEventPublishFailed("dispatch")
+        }
     }
 
     private fun publish(claims: TokenClaims, rawToken: String, type: AuthTokenEvent.EventType) {
@@ -178,6 +206,9 @@ class RecordingAuthTokenPublisher : AuthTokenEventPublisher {
     data class Event(val type: AuthTokenEvent.EventType, val claims: TokenClaims, val rawToken: String)
 
     private val _events = mutableListOf<Event>()
+    /** User ids whose whole session set was revoked (password reset). */
+    val userRevocations = mutableListOf<java.util.UUID>()
+
     val events: List<Event> get() = synchronized(_events) { _events.toList() }
 
     override fun publishIssued(claims: TokenClaims, rawToken: String) {
@@ -186,6 +217,10 @@ class RecordingAuthTokenPublisher : AuthTokenEventPublisher {
 
     override fun publishRevoked(claims: TokenClaims, rawToken: String) {
         synchronized(_events) { _events += Event(AuthTokenEvent.EventType.REVOKED, claims, rawToken) }
+    }
+
+    override fun publishUserRevoked(userId: java.util.UUID) {
+        synchronized(_events) { userRevocations += userId }
     }
 
     override fun close() {}

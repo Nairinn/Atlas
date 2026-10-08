@@ -81,7 +81,22 @@ class TokenEventConsumer(
             return
         }
         if (event.eventType == AuthTokenEvent.EventType.REVOKED) {
-            cache.evictByTokenHash(event.tokenHash)
+            if (event.tokenHash.isBlank()) {
+                // The user-wide form (password reset): no single hash to
+                // name, so the peer drops every cached validation for the
+                // user. Without this, only the instance that handled the
+                // reset evicts, and every other replica keeps validating
+                // pre-reset tokens for the rest of the 30s TTL.
+                val userId = try {
+                    java.util.UUID.fromString(event.userId)
+                } catch (e: IllegalArgumentException) {
+                    LOG.warn("skipped user-wide revocation with bad user_id {}", event.userId)
+                    return
+                }
+                cache.evictUser(userId)
+            } else {
+                cache.evictByTokenHash(event.tokenHash)
+            }
         }
     }
 

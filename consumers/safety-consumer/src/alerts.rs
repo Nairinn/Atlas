@@ -146,9 +146,10 @@ pub async fn recorded_memberships(
 /// sub-millisecond local-network ack with a hard 10s timeout, not a
 /// third-party HTTP call.
 ///
-/// The read is `FOR UPDATE` so two instances briefly overlapping on a
-/// partition during a rebalance cannot interleave into a half-applied
-/// membership set.
+/// A transaction-scoped advisory lock on (project, user) opens the
+/// critical section, so two instances briefly overlapping on a partition
+/// during a rebalance cannot interleave a read-diff-publish-write at all;
+/// `FOR UPDATE` below only keeps the row set stable while it is held.
 pub async fn apply_position(
     pool: &sqlx::PgPool,
     publisher: &impl crate::producer::AlertPublisher,
@@ -158,19 +159,34 @@ pub async fn apply_position(
     lng: f64,
     occurred_at: i64,
 ) -> anyhow::Result<Transitions> {
-    let current = fences_containing(pool, project_id, user_id, lat, lng).await?;
-
     let mut tx = pool.begin().await?;
+
+    // Advisory lock keyed on (project, user), taken at the START of the
+    // transaction. `FOR UPDATE` alone only serialized the membership
+    // read; the fences_containing read above ran outside any lock, so
+    // two consumers briefly overlapping on a partition during a
+    // rebalance could each compute a diff against a different view of
+    // "previous" and emit duplicate ENTERED alerts for the same
+    // crossing. The lock makes the whole read-diff-publish-write block
+    // one critical section; the release is the commit.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text || ' ' || $2::text))")
+        .bind(project_id.to_string())
+        .bind(user_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+    let current = fences_containing(pool, project_id, user_id, lat, lng).await?;
 
     let previous_rows: Vec<(Uuid,)> = sqlx::query_as(
         r#"
         SELECT geofence_id
         FROM geo.geofence_memberships
-        WHERE user_id = $1
+        WHERE project_id = $1 AND user_id = $2
         ORDER BY geofence_id
         FOR UPDATE
         "#,
     )
+    .bind(project_id)
     .bind(user_id)
     .fetch_all(&mut *tx)
     .await?;
@@ -209,11 +225,12 @@ pub async fn apply_position(
         // the diff above raced with another instance.
         sqlx::query(
             r#"
-            INSERT INTO geo.geofence_memberships (user_id, geofence_id)
-            SELECT $1, UNNEST($2::uuid[])
-            ON CONFLICT (user_id, geofence_id) DO NOTHING
+            INSERT INTO geo.geofence_memberships (project_id, user_id, geofence_id)
+            SELECT $1, $2, UNNEST($3::uuid[])
+            ON CONFLICT (project_id, user_id, geofence_id) DO NOTHING
             "#,
         )
+        .bind(project_id)
         .bind(user_id)
         .bind(&transitions.entered)
         .execute(&mut *tx)
@@ -224,9 +241,10 @@ pub async fn apply_position(
         sqlx::query(
             r#"
             DELETE FROM geo.geofence_memberships
-            WHERE user_id = $1 AND geofence_id = ANY($2::uuid[])
+            WHERE project_id = $1 AND user_id = $2 AND geofence_id = ANY($3::uuid[])
             "#,
         )
+        .bind(project_id)
         .bind(user_id)
         .bind(&transitions.exited)
         .execute(&mut *tx)

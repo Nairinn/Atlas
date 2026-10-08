@@ -98,17 +98,27 @@ impl GeoEngine for GeoEngineImpl {
         &self,
         req: Request<LocationUpdate>,
     ) -> Result<Response<LocationAck>, Status> {
+        let started = Instant::now();
         let r = req.into_inner();
         let project_id = parse_project_id(&r.project_id)?;
         let user_id = parse_user_id(&r.user_id)?;
-        // Trust the proto-supplied timestamp but fall back to "now" when
-        // the client sends 0 (common on first ping before time is set).
+        // The proto-supplied timestamp, clamped into the retention window
+        // [now - 24h, now + 5min]. Without the clamp a batched or
+        // clock-skewed client could stamp a ping in the past — where the
+        // reaper deletes it immediately — or in the far future, where it
+        // would survive retention until the clock catches up. Zero means
+        // "not set" and falls back to now.
+        let now = Utc::now();
         let recorded_at = if r.recorded_at > 0 {
-            Utc.timestamp_opt(r.recorded_at, 0)
+            let sent = Utc
+                .timestamp_opt(r.recorded_at, 0)
                 .single()
-                .ok_or_else(|| Status::invalid_argument("recorded_at out of range"))?
+                .ok_or_else(|| Status::invalid_argument("recorded_at out of range"))?;
+            let floor = now - chrono::Duration::hours(24);
+            let ceil = now + chrono::Duration::minutes(5);
+            sent.clamp(floor, ceil)
         } else {
-            Utc::now()
+            now
         };
 
         queries::locations::insert_location(
@@ -124,6 +134,8 @@ impl GeoEngine for GeoEngineImpl {
             warn!(error = %e, "insert_location failed");
             Status::internal("failed to record location")
         })?;
+        metrics::histogram!("atlas_geo_update_location_duration_ms")
+            .record(started.elapsed().as_secs_f64() * 1000.0);
 
         // Fire-and-forget Kafka enqueue. The row is in Postgres regardless.
         self.producer.enqueue(&LocationUpdateEvent {
@@ -149,10 +161,13 @@ impl GeoEngine for GeoEngineImpl {
         let requester = parse_user_id(&r.requester_user_id)?;
         let radius = clamp_radius(r.radius_m)?;
         let limit = clamp_limit(r.limit);
-        let role = if r.role.is_empty() {
-            "unknown".to_string()
-        } else {
-            r.role.clone()
+        // Cardinatity-bounded label: the caller can send any string, so
+        // map to a fixed vocabulary before it reaches the metric. An
+        // unbounded label is a memory leak with a nice name.
+        let role = match r.role.as_str() {
+            "driver" => "driver",
+            "walker" => "walker",
+            _ => "unknown",
         };
 
         let start = Instant::now();
@@ -166,7 +181,7 @@ impl GeoEngine for GeoEngineImpl {
         })?;
         metrics::histogram!(
             "atlas_geo_nearby_query_duration_ms",
-            "role" => role.clone(),
+            "role" => role,
         )
         .record(start.elapsed().as_secs_f64() * 1000.0);
 
@@ -290,6 +305,7 @@ impl GeoEngine for GeoEngineImpl {
         &self,
         req: Request<CreateGeofenceRequest>,
     ) -> Result<Response<Geofence>, Status> {
+        let started = Instant::now();
         let r = req.into_inner();
         let project_id = parse_project_id(&r.project_id)?;
         let user_id = parse_user_id(&r.user_id)?;
@@ -320,6 +336,8 @@ impl GeoEngine for GeoEngineImpl {
         })?;
 
         info!(geofence_id = %row.id, user_id = %row.user_id, "geofence created");
+        metrics::histogram!("atlas_geo_create_geofence_duration_ms")
+            .record(started.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(to_proto(row)))
     }
 
@@ -327,6 +345,7 @@ impl GeoEngine for GeoEngineImpl {
         &self,
         req: Request<ListGeofencesRequest>,
     ) -> Result<Response<ListGeofencesResponse>, Status> {
+        let started = Instant::now();
         let r = req.into_inner();
         let project_id = parse_project_id(&r.project_id)?;
         let user_id = parse_user_id(&r.user_id)?;
@@ -336,6 +355,8 @@ impl GeoEngine for GeoEngineImpl {
                 warn!(error = %e, "list_geofences failed");
                 Status::internal("list_geofences failed")
             })?;
+        metrics::histogram!("atlas_geo_list_geofences_duration_ms")
+            .record(started.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(ListGeofencesResponse {
             geofences: rows.into_iter().map(to_proto).collect(),
         }))
@@ -345,6 +366,7 @@ impl GeoEngine for GeoEngineImpl {
         &self,
         req: Request<DeleteGeofenceRequest>,
     ) -> Result<Response<DeleteGeofenceResponse>, Status> {
+        let started = Instant::now();
         let r = req.into_inner();
         let project_id = parse_project_id(&r.project_id)?;
         let user_id = parse_user_id(&r.user_id)?;
@@ -356,6 +378,8 @@ impl GeoEngine for GeoEngineImpl {
                 warn!(error = %e, "delete_geofence failed");
                 Status::internal("delete_geofence failed")
             })?;
+        metrics::histogram!("atlas_geo_delete_geofence_duration_ms")
+            .record(started.elapsed().as_secs_f64() * 1000.0);
         Ok(Response::new(DeleteGeofenceResponse { deleted }))
     }
 
@@ -363,6 +387,7 @@ impl GeoEngine for GeoEngineImpl {
         &self,
         req: Request<SafetyVoteRequest>,
     ) -> Result<Response<SafetyVoteResponse>, Status> {
+        let started = Instant::now();
         let r = req.into_inner();
         let project_id = parse_project_id(&r.project_id)?;
         let user_id = parse_user_id(&r.user_id)?;
@@ -403,6 +428,8 @@ impl GeoEngine for GeoEngineImpl {
             },
         )
         .increment(1);
+        metrics::histogram!("atlas_geo_cast_safety_vote_duration_ms")
+            .record(started.elapsed().as_secs_f64() * 1000.0);
 
         Ok(Response::new(SafetyVoteResponse {
             safety_score: score.score,

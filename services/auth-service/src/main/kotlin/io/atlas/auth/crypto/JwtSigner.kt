@@ -50,11 +50,17 @@ interface JwtSigner {
  * to try, instead of trying all of them and treating "none worked" as
  * both "wrong key" and "forged token".
  */
+/** Fixed values for iss/aud: Atlas is the only issuer and only audience
+ * of its own tokens, and pinning both closes the "same key, different
+ * purpose" confusion a shared-secret design otherwise allows. */
+private const val ISSUER = "atlas"
+private const val AUDIENCE = "atlas.auth"
+
 data class SigningKey(val id: String, val secret: String) {
     init {
         require(id.isNotBlank()) { "signing key id must not be blank" }
-        require(secret.length >= 32) {
-            "JWT secret must be at least 32 bytes for HS256; got ${secret.length}"
+        require(secret.toByteArray(Charsets.UTF_8).size >= 32) {
+            "JWT secret must be at least 32 BYTES for HS256; got ${secret.toByteArray(Charsets.UTF_8).size}"
         }
     }
 }
@@ -104,6 +110,8 @@ class Jose4jJwtSigner(
 
     override fun sign(claims: TokenClaims): String {
         val jwt = JwtClaims().apply {
+            issuer = ISSUER
+            setAudience(listOf(AUDIENCE))
             subject = claims.userId.toString()
             issuedAt = org.jose4j.jwt.NumericDate.fromSeconds(claims.issuedAt.epochSecond)
             expirationTime = org.jose4j.jwt.NumericDate.fromSeconds(claims.expiresAt.epochSecond)
@@ -132,6 +140,16 @@ class Jose4jJwtSigner(
         val consumer = JwtConsumerBuilder()
             .setRequireExpirationTime()
             .setRequireSubject()
+            // iat bounds the token's lifetime from the front: without it
+            // a token has an expiry but no beginning, and there is nothing
+            // to compare a revocation timestamp against.
+            .setRequireIssuedAt()
+            // iss/aud pin the token to this platform. Without them any
+            // HMAC key this service ever held (retired or active) could
+            // mint tokens for ANY purpose, and a token signed for some
+            // other audience by the same key would verify here.
+            .setExpectedIssuer(ISSUER)
+            .setExpectedAudience(AUDIENCE)
             .setVerificationKey(verificationKey)
             .setJwsAlgorithmConstraints(
                 org.jose4j.jwa.AlgorithmConstraints(

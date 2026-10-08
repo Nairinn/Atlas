@@ -25,6 +25,10 @@ pub struct Config {
     /// Rows deleted per statement. Batching keeps each DELETE's lock
     /// footprint small so the reaper never blocks the ingest path.
     pub sweep_batch_size: i64,
+    /// Safety votes older than this are pruned. Votes are opinions about a
+    /// place, and a place at 2am is not the place at 2pm: a year of them is
+    /// plenty of signal. Default 365 days.
+    pub safety_vote_horizon: Duration,
 }
 
 impl Config {
@@ -45,6 +49,10 @@ impl Config {
                 .expect("METRICS_ADDR must be a valid socket address"),
             sweep_interval: Duration::from_secs(parse_or("SWEEP_INTERVAL_SECONDS", 300)),
             sweep_batch_size: parse_or("SWEEP_BATCH_SIZE", 5_000),
+            safety_vote_horizon: Duration::from_secs(parse_or(
+                "SAFETY_VOTE_HORIZON_SECONDS",
+                365 * 24 * 3600,
+            )),
         }
     }
 }

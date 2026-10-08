@@ -10,8 +10,14 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Insert a location ping. `expires_at` defaults to `NOW() + 24h` via the
-/// column default in migration 0020.
+/// Insert a location ping.
+///
+/// `expires_at` is `recorded_at + 24h`, set explicitly rather than left to
+/// the column default (`NOW() + 24h`): retention must start when the fix
+/// was taken, not when the server happened to receive it — a batched
+/// upload of hour-old pings would otherwise live an hour longer than the
+/// retention window says. The service layer clamps `recorded_at` into the
+/// window, so the arithmetic here cannot resurrect an already-expired row.
 pub async fn insert_location(
     pool: &PgPool,
     project_id: Uuid,
@@ -22,12 +28,13 @@ pub async fn insert_location(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO geo.locations (project_id, user_id, position, recorded_at)
+        INSERT INTO geo.locations (project_id, user_id, position, recorded_at, expires_at)
         VALUES (
             $5,
             $1,
             ST_SetSRID(ST_MakePoint($2, $3), 4326),
-            $4
+            $4,
+            $4 + INTERVAL '24 hours'
         )
         "#,
     )
@@ -72,7 +79,7 @@ pub struct NearbyRow {
 /// matter whose application asked, which is a cross-tenant read of people's
 /// locations. It was exactly that until this filter existed.
 ///
-/// The safety_ratings join is scoped for the same reason: the scores are
+/// The safety_votes join is scoped for the same reason: the scores are
 /// derived from one tenant's users' votes, and letting another tenant's
 /// votes move the number would leak behaviour across the boundary.
 ///

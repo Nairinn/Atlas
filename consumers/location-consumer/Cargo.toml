@@ -26,3 +26,8 @@ axum = { workspace = true }
 # prost-build rather than tonic-build: this crate decodes Kafka payloads
 # and never speaks gRPC, so it has no use for service stubs.
 prost-build = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }

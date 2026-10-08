@@ -217,8 +217,15 @@ class AuthGrpcService(
         // Every session for this user was just revoked, so the validation
         // cache must forget them too — otherwise a token issued before the
         // reset keeps validating from memory for the rest of the TTL,
-        // which is exactly the window the reset exists to close.
+        // which is exactly the window the reset exists to close. This
+        // instance evicts directly; the fanout tells peer replicas, whose
+        // caches hold their own copies of the same tokens.
         cache.evictUser(userId)
+        try {
+            publisher.publishUserRevoked(userId)
+        } catch (e: Exception) {
+            LOG.warn("user-wide revocation fanout failed; peers recover via the 30s TTL", e)
+        }
         return ResetPasswordResponse.newBuilder().setUserId(userId.toString()).build()
     }
 

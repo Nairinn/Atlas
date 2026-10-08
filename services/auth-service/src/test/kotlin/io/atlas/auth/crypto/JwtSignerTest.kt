@@ -94,6 +94,8 @@ class JwtSignerTest {
         val now = Instant.now()
         // Hand-built to omit the claim, since `sign` always writes it.
         val jwt = org.jose4j.jwt.JwtClaims().apply {
+            issuer = "atlas"
+            setAudience(listOf("atlas.auth"))
             subject = UUID.randomUUID().toString()
             issuedAt = org.jose4j.jwt.NumericDate.fromSeconds(now.epochSecond)
             expirationTime = org.jose4j.jwt.NumericDate.fromSeconds(now.epochSecond + 3600)

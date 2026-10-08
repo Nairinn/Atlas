@@ -29,6 +29,70 @@ pub fn build(brokers: &str, group: &str) -> anyhow::Result<StreamConsumer> {
     Ok(consumer)
 }
 
+/// Attempts per message before the loop commits and moves on. Eight with
+/// the doubling backoff below spans ~1 minute of transient outage.
+pub const MAX_ATTEMPTS: u32 = 8;
+
+/// Backoff before attempt N+1: 250ms doubling, capped at ~16s.
+fn backoff_for(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(250u64 << (attempt.saturating_sub(1)).min(6))
+}
+
+/// Outcome of one attempt to process one message.
+///
+/// The old shape — `Handled` from `handle_payload` consumed by a match in
+/// the run loop — could not be tested without Kafka, which is how the
+/// message-skipping bug survived. This helper is the retry loop,
+/// extracted so its behaviour is testable: retries the same message in
+/// place with a caller-supplied delay, gives up after
+/// [MAX_ATTEMPTS], and reports whether it committed or exhausted.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProcessedMessage {
+    /// Processed, or a permanent failure we count and skip.
+    Committed,
+    /// Retried [MAX_ATTEMPTS] times without success; committed to
+    /// unblock the partition. The `exhausted_retries` counter fires.
+    Exhausted,
+}
+
+pub async fn process_with_retries<F, Fut, D, DSleep>(
+    mut attempt_once: F,
+    mut sleep: D,
+) -> ProcessedMessage
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Handled>,
+    D: FnMut(u32) -> DSleep,
+    DSleep: std::future::Future<Output = ()>,
+{
+    let mut attempt = 0u32;
+    loop {
+        match attempt_once().await {
+            Handled::Commit => return ProcessedMessage::Committed,
+            Handled::Retry => {
+                attempt += 1;
+                metrics::counter!(
+                    "atlas_safety_consumer_errors_total", "kind" => "retryable"
+                )
+                .increment(1);
+                if attempt >= MAX_ATTEMPTS {
+                    metrics::counter!(
+                        "atlas_safety_consumer_errors_total",
+                        "kind" => "exhausted_retries"
+                    )
+                    .increment(1);
+                    warn!(
+                        attempts = attempt,
+                        "giving up on a message after bounded retries; committing to unblock the partition"
+                    );
+                    return ProcessedMessage::Exhausted;
+                }
+                sleep(attempt).await;
+            }
+        }
+    }
+}
+
 /// Outcome of handling one message, so the caller knows whether the
 /// offset may advance.
 #[derive(Debug, PartialEq, Eq)]
@@ -71,22 +135,25 @@ pub async fn run(
                     }
                 };
 
-                match handle_payload(&pool, &publisher, msg.payload()).await {
-                    Handled::Commit => {
-                        if let Err(e) = consumer.commit_message(&msg, CommitMode::Async) {
-                            warn!(error = %e, "offset commit failed");
-                        }
-                    }
-                    Handled::Retry => {
-                        // Deliberately no commit. The broker redelivers
-                        // after the session times out or on the next
-                        // rebalance, and `apply_position` is safe to
-                        // repeat.
-                        metrics::counter!(
-                            "atlas_safety_consumer_errors_total", "kind" => "retryable"
-                        )
-                        .increment(1);
-                    }
+                // Retry in place with bounded backoff. The old code
+                // dropped to the next recv() without committing, which
+                // SKIPPED the failed message: the next poll returns the
+                // following record, and redelivery would only happen on a
+                // rebalance that may never come.
+                let apply_started = std::time::Instant::now();
+                process_with_retries(
+                    || handle_payload(&pool, &publisher, msg.payload()),
+                    |attempt| tokio::time::sleep(backoff_for(attempt)),
+                )
+                .await;
+                metrics::histogram!("atlas_safety_consumer_apply_duration_ms")
+                    .record(apply_started.elapsed().as_secs_f64() * 1000.0);
+                if let Err(e) = consumer.commit_message(&msg, CommitMode::Async) {
+                    metrics::counter!(
+                        "atlas_safety_consumer_errors_total", "kind" => "commit"
+                    )
+                    .increment(1);
+                    warn!(error = %e, "offset commit failed");
                 }
             }
         }
@@ -205,6 +272,47 @@ mod tests {
             .acquire_timeout(std::time::Duration::from_millis(250))
             .connect_lazy("postgres://atlas:atlas_dev@127.0.0.1:59999/atlas")
             .expect("lazy pool")
+    }
+
+    /// Redelivery behaviour, not just the enum: a failing payload is
+    /// retried in place on the SAME message (attempt count grows), a
+    /// success on the 3rd try commits, and a permanent failure exhausts
+    /// at MAX_ATTEMPTS instead of looping forever.
+    #[tokio::test]
+    async fn retries_the_same_message_in_place_until_it_commits() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let r = process_with_retries(
+            || async {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n < 2 {
+                    Handled::Retry
+                } else {
+                    Handled::Commit
+                }
+            },
+            |_| std::future::ready(()),
+        )
+        .await;
+        assert_eq!(r, ProcessedMessage::Committed);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_message_that_never_succeeds_is_skipped_after_max_attempts() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let r = process_with_retries(
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Handled::Retry
+            },
+            |_| std::future::ready(()),
+        )
+        .await;
+        assert_eq!(r, ProcessedMessage::Exhausted);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_ATTEMPTS
+        );
     }
 
     #[tokio::test]
