@@ -2,7 +2,7 @@
 
 **Atlas is a developer platform for building location-aware, real-time, transactional apps.** Drop it into a mobility project and you get auth, geospatial queries, payments, and an event bus without configuring any of it yourself.
 
-The platform exposes four namespaces that mirror four backend services: `atlas.auth` for JWT identity with optional geospatial claims, `atlas.geo` for PostGIS-backed nearby search, route scoring, and geofencing, `atlas.payments` for wallets, idempotent transactions, and settlement, and `atlas.events` for a protobuf-encoded Kafka event bus.
+The SDKs expose three namespaces, one per backend service: `atlas.auth` for JWT identity with optional geospatial claims, `atlas.geo` for PostGIS-backed nearby search, route scoring, and geofencing, and `atlas.payments` for wallets, idempotent transactions, and settlement. Events have no HTTP surface. They travel over a protobuf-encoded Kafka bus that your app consumes directly (see Event flow).
 
 Atlas is multi-tenant: many applications share one deployment and none of them can see another's users, locations, or money. A developer drops an `atlas.toml` in their project root, runs `atlas deploy`, and calls the SDK in their language of choice.
 
@@ -348,7 +348,7 @@ Findings are cross-checked against `cargo tree`, which resolves features. Runs i
 
 ## Alerting
 
-`infra/k8s/base/monitoring/alerts.yaml` holds 11 Prometheus rules. Three of them carry most of the design:
+`infra/k8s/base/monitoring/alerts.yaml` holds 12 Prometheus rules. Three of them carry most of the design:
 
 * **`AtlasOutboxNotDraining`** watches the AGE of the oldest pending outbox row, not the count. A big backlog that is draining is a busy system; a small one that is not draining is a broken one, and only age tells them apart. It alerts on a gauge rather than on `outbox_dispatched_total`, because that counter simply *stops* when Kafka is unreachable, and a counter that stops looks like a system with nothing to do.
 * **`AtlasTenantMismatchSpike`** fires on tokens presented with the wrong project key. That is either a broken integration or somebody probing the boundary, and both deserve a human.
@@ -395,7 +395,7 @@ All three share the same decisions. The project key is required at construction 
 import { AtlasClient, AtlasError } from '@atlas/sdk';
 
 const atlas = new AtlasClient({
-  baseUrl: 'https://api.atlas.dev',
+  baseUrl: 'http://localhost:8080',      // the gateway; use your own deployment's URL
   projectKey: process.env.ATLAS_KEY!,   // sent on every call
 });
 await atlas.auth.login({ email, password });   // token stored on the client
@@ -478,6 +478,10 @@ atlas/
 └── docker-compose.yml  # Local dev environment
 ```
 
+## License
+
+MIT. See [`LICENSE`](LICENSE).
+
 ## Author
 
-Naing Lynn
+Naing Lynn Kyaw ([@Nairinn](https://github.com/Nairinn))

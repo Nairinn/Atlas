@@ -20,7 +20,6 @@ geo_claims           = true
 
 [geo]
 default_radius_m     = 500
-elo_recompute_cron   = "0 3 * * *"
 location_ttl_hours   = 24
 
 [payments]
@@ -30,6 +29,7 @@ idempotency_window_s = 86400
 
 [events]
 # Short topic names. The platform prepends `atlas.` internally.
-# Known topics: location.updates, fare.events, auth.tokens, safety.alerts, elo.recompute
+# Known topics: location.updates, fare.events, auth.tokens, safety.alerts
+# (elo.recompute is also accepted but reserved: nothing produces or consumes it)
 topics          = ["location.updates", "fare.events", "auth.tokens", "safety.alerts"]
 retention_hours = 168
