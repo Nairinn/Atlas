@@ -13,7 +13,6 @@ path = "src/main.rs"
 axum = { workspace = true }
 tonic = { workspace = true }
 tokio = { workspace = true }
-tower = { workspace = true }
 tower-http = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }
@@ -23,7 +22,6 @@ tracing-subscriber = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 governor = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true }

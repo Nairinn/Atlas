@@ -97,16 +97,12 @@ dependencies {
     // Ktor HTTP (metrics + provider webhooks) and Micrometer Prometheus
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)
-    implementation(libs.ktor.server.content.negotiation)
-    implementation(libs.ktor.serialization.jackson)
     implementation(libs.micrometer.registry.prometheus)
     // Stripe Connect adapter (per-project processor accounts)
     implementation(libs.stripe.java)
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.junit.jupiter)
-    testImplementation(libs.kotlinx.coroutines.test)
-    testImplementation(libs.grpc.testing)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 

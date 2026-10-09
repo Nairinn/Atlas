@@ -24,10 +24,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-async-trait = { workspace = true }
-futures = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 axum = { workspace = true }
 
 [build-dependencies]
@@ -35,4 +32,6 @@ tonic-build = { workspace = true }
 prost-build = { workspace = true }
 
 [dev-dependencies]
-# Integration tests reuse the same deps as the binary.
+# Integration tests reuse the same deps as the binary (kept as an explicit,
+# empty section so the convention is visible: the DB tests use no extra
+# test-only crates).

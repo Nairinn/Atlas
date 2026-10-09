@@ -29,7 +29,7 @@ use crate::pb::geo::{
     geo_engine_server::GeoEngine, safety_vote_request::Verdict, CreateGeofenceRequest,
     DeleteGeofenceRequest, DeleteGeofenceResponse, Geofence, GeofenceCheckRequest,
     GeofenceCheckResponse, ListGeofencesRequest, ListGeofencesResponse, LocationAck,
-    LocationUpdate, NearbyRequest, NearbyResponse, NearbyUser, RouteScoreRequest,
+    LocationUpdate, NearbyRequest, NearbyResponse, NearbyUser, Role, RouteScoreRequest,
     RouteScoreResponse, SafetyVoteRequest, SafetyVoteResponse, ScoredRoute,
 };
 use crate::queries;
@@ -161,12 +161,13 @@ impl GeoEngine for GeoEngineImpl {
         let requester = parse_user_id(&r.requester_user_id)?;
         let radius = clamp_radius(r.radius_m)?;
         let limit = clamp_limit(r.limit);
-        // Cardinatity-bounded label: the caller can send any string, so
-        // map to a fixed vocabulary before it reaches the metric. An
-        // unbounded label is a memory leak with a nice name.
-        let role = match r.role.as_str() {
-            "driver" => "driver",
-            "walker" => "walker",
+        // The proto Role enum keeps this label bounded by construction;
+        // proto3 maps an unrecognized wire value to the zero variant, so
+        // an old gateway sending a new role string degrades to "unknown"
+        // rather than minting a series.
+        let role = match Role::try_from(r.role).unwrap_or(Role::Unknown) {
+            Role::Driver => "driver",
+            Role::Walker => "walker",
             _ => "unknown",
         };
 

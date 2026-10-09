@@ -2,34 +2,29 @@
 //!
 //! A developer drops `atlas.toml` in their project root to configure which
 //! Atlas platform services they want. This module parses and validates that
-//! file. Unknown keys are hard errors (typo protection). Missing required
-//! fields are hard errors. Cross-section consistency is checked after the
-//! deserializer runs.
+//! file. Unknown keys are hard errors (typo protection), with one
+//! deliberate exception: the removed per-service tuning sections
+//! (`[auth]`, `[geo]`, `[payments]`, `[events]`) are accepted for one
+//! release with a deprecation warning, so an existing file keeps working
+//! while its owner notices the removal.
 //!
-//! Topic names in `[events].topics` are the *developer-facing* short form
-//! (e.g. `"location.updates"`). The platform prepends `atlas.` internally
-//! to produce the actual Kafka topic name. See `KNOWN_TOPICS`.
+//! Why those sections went: nothing downstream ever read them. The deploy
+//! request posts the service toggles and nothing else — the per-service
+//! values validated fields no platform component consumed.
 
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
-/// Topic short-names a developer is allowed to enable in `atlas.toml`.
-/// The platform internally maps these to fully-qualified `atlas.*` topics.
-pub const KNOWN_TOPICS: &[&str] = &[
-    "location.updates",
-    "fare.events",
-    "auth.tokens",
-    "safety.alerts",
-    "elo.recompute",
-];
-
 /// Regions where Atlas projects can be provisioned.
 pub const KNOWN_REGIONS: &[&str] = &["us-central1", "eu-west1", "ap-southeast1"];
 
 /// API key prefixes. Each maps to a deployment tier.
 const KEY_PREFIXES: &[&str] = &["atl_live_", "atl_test_", "atl_dev_"];
+
+/// Sections that used to be parsed and are now ignored with a warning.
+const DEPRECATED_SECTIONS: &[&str] = &["auth", "geo", "payments", "events"];
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -51,21 +46,17 @@ pub enum ConfigError {
     Validation(String),
 }
 
-/// Top-level config. Every section uses `deny_unknown_fields` so typos
-/// like `[paymetns]` surface as an error instead of silently being ignored.
+/// Top-level config. Everything uses `deny_unknown_fields` so typos like
+/// `[paymetns]` surface as an error instead of silently being ignored.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AtlasConfig {
     pub project: Project,
     pub services: Services,
-    #[serde(default)]
-    pub auth: Option<AuthConfig>,
-    #[serde(default)]
-    pub geo: Option<GeoConfig>,
-    #[serde(default)]
-    pub payments: Option<PaymentsConfig>,
-    #[serde(default)]
-    pub events: Option<EventsConfig>,
+    /// The deprecated per-service sections actually found in the file, so
+    /// `atlas validate` can warn rather than silently swallowing them.
+    #[serde(skip)]
+    pub deprecated_sections: Vec<&'static str>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -108,85 +99,10 @@ pub struct Services {
     pub events: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct AuthConfig {
-    #[serde(default = "default_token_expiry")]
-    pub token_expiry_seconds: u32,
-    #[serde(default = "default_true")]
-    pub geo_claims: bool,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct GeoConfig {
-    #[serde(default = "default_radius")]
-    pub default_radius_m: u32,
-    #[serde(default = "default_elo_cron")]
-    pub elo_recompute_cron: String,
-    #[serde(default = "default_location_ttl")]
-    pub location_ttl_hours: u32,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct PaymentsConfig {
-    #[serde(default = "default_currency")]
-    pub currency: String,
-    #[serde(default)]
-    pub settlement_mode: SettlementMode,
-    #[serde(default = "default_idempotency_window")]
-    pub idempotency_window_s: u32,
-}
-
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SettlementMode {
-    #[default]
-    Auto,
-    Manual,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct EventsConfig {
-    pub topics: Vec<String>,
-    #[serde(default = "default_retention_hours")]
-    pub retention_hours: u32,
-}
-
-// --- Defaults --------------------------------------------------------------
-
-fn default_token_expiry() -> u32 {
-    3600
-}
-fn default_true() -> bool {
-    true
-}
-fn default_radius() -> u32 {
-    500
-}
-fn default_elo_cron() -> String {
-    "0 3 * * *".to_string()
-}
-fn default_location_ttl() -> u32 {
-    24
-}
-fn default_currency() -> String {
-    "USD".to_string()
-}
-fn default_idempotency_window() -> u32 {
-    86_400
-}
-fn default_retention_hours() -> u32 {
-    168
-}
-
 // --- Loading + validation --------------------------------------------------
 
 impl AtlasConfig {
-    /// Read and validate `atlas.toml` from a path. Validation includes both
-    /// `serde`'s structural checks and the semantic checks in `validate()`.
+    /// Read and validate `atlas.toml` from a path.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path_str = path.as_ref().display().to_string();
         let raw = fs::read_to_string(&path).map_err(|source| ConfigError::Io {
@@ -197,11 +113,49 @@ impl AtlasConfig {
     }
 
     /// Parse a config from a string. Public for unit tests.
+    ///
+    /// Deprecated sections are commented out before the TOML parse — one
+    /// release of tolerance — and recorded so callers can warn. The strip
+    /// runs from a removed section's header to the NEXT header (or EOF),
+    /// because the fields inside belong to the removed section; leaving
+    /// them behind would dump them into whatever table was open above.
     pub fn parse_str(raw: &str, path_label: &str) -> Result<Self, ConfigError> {
-        let cfg: AtlasConfig = toml::from_str(raw).map_err(|source| ConfigError::Parse {
-            path: path_label.to_string(),
-            source,
-        })?;
+        let mut found: Vec<&'static str> = Vec::new();
+        let mut stripped_lines: Vec<String> = Vec::new();
+        let mut suppressing = false;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                suppressing = DEPRECATED_SECTIONS
+                    .iter()
+                    .any(|s| trimmed == format!("[{s}]"));
+                if let Some(name) = DEPRECATED_SECTIONS
+                    .iter()
+                    .find(|s| trimmed == format!("[{s}]"))
+                {
+                    if !found.contains(name) {
+                        found.push(name);
+                    }
+                }
+                if suppressing {
+                    stripped_lines.push(format!("# deprecated, ignored: {trimmed}"));
+                    continue;
+                }
+            }
+            if suppressing {
+                stripped_lines.push(format!("# deprecated, ignored: {trimmed}"));
+            } else {
+                stripped_lines.push(line.to_string());
+            }
+        }
+        let stripped = stripped_lines.join("\n");
+
+        let mut cfg: AtlasConfig =
+            toml::from_str(&stripped).map_err(|source| ConfigError::Parse {
+                path: path_label.to_string(),
+                source,
+            })?;
+        cfg.deprecated_sections = found;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -253,113 +207,7 @@ impl AtlasConfig {
             ));
         }
 
-        // --- per-service sections only meaningful when the service is enabled ---
-        // We do NOT error if e.g. [auth] is present but services.auth = false —
-        // that's a soft mistake we'll warn about during `validate` command output.
-        // We DO error on invalid values inside enabled sections.
-        if self.services.auth {
-            if let Some(a) = &self.auth {
-                if a.token_expiry_seconds == 0 {
-                    return Err(ConfigError::Validation(
-                        "auth.token_expiry_seconds must be > 0".into(),
-                    ));
-                }
-                if a.token_expiry_seconds > 60 * 60 * 24 * 30 {
-                    return Err(ConfigError::Validation(
-                        "auth.token_expiry_seconds must be <= 30 days (2592000)".into(),
-                    ));
-                }
-            }
-        }
-
-        if self.services.geo {
-            if let Some(g) = &self.geo {
-                if g.default_radius_m == 0 {
-                    return Err(ConfigError::Validation(
-                        "geo.default_radius_m must be > 0".into(),
-                    ));
-                }
-                if g.default_radius_m > 50_000 {
-                    return Err(ConfigError::Validation(
-                        "geo.default_radius_m must be <= 50000 (50km)".into(),
-                    ));
-                }
-                if g.location_ttl_hours == 0 {
-                    return Err(ConfigError::Validation(
-                        "geo.location_ttl_hours must be > 0".into(),
-                    ));
-                }
-                if !is_plausible_cron(&g.elo_recompute_cron) {
-                    return Err(ConfigError::Validation(format!(
-                        "geo.elo_recompute_cron '{}' does not look like a 5-field cron expression",
-                        g.elo_recompute_cron
-                    )));
-                }
-            }
-        }
-
-        if self.services.payments {
-            if let Some(p) = &self.payments {
-                if p.currency.len() != 3 || !p.currency.chars().all(|c| c.is_ascii_uppercase()) {
-                    return Err(ConfigError::Validation(format!(
-                        "payments.currency '{}' must be a 3-letter ISO 4217 code (e.g. USD)",
-                        p.currency
-                    )));
-                }
-                if p.idempotency_window_s == 0 {
-                    return Err(ConfigError::Validation(
-                        "payments.idempotency_window_s must be > 0".into(),
-                    ));
-                }
-            }
-        }
-
-        if self.services.events {
-            let events = self.events.as_ref().ok_or_else(|| {
-                ConfigError::Validation(
-                    "[events] section is required when services.events = true".into(),
-                )
-            })?;
-            if events.topics.is_empty() {
-                return Err(ConfigError::Validation(
-                    "events.topics must list at least one topic".into(),
-                ));
-            }
-            for t in &events.topics {
-                if !KNOWN_TOPICS.contains(&t.as_str()) {
-                    return Err(ConfigError::Validation(format!(
-                        "events.topics contains unknown topic '{}'. Known topics: {:?}",
-                        t, KNOWN_TOPICS
-                    )));
-                }
-            }
-            if events.retention_hours == 0 || events.retention_hours > 720 {
-                return Err(ConfigError::Validation(
-                    "events.retention_hours must be between 1 and 720 (30 days)".into(),
-                ));
-            }
-        }
-
         Ok(())
-    }
-
-    /// Sections that are present in the file but whose service is disabled.
-    /// Returned as warnings (non-fatal) by the `validate` command.
-    pub fn dangling_sections(&self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        if self.auth.is_some() && !self.services.auth {
-            out.push("auth");
-        }
-        if self.geo.is_some() && !self.services.geo {
-            out.push("geo");
-        }
-        if self.payments.is_some() && !self.services.payments {
-            out.push("payments");
-        }
-        if self.events.is_some() && !self.services.events {
-            out.push("events");
-        }
-        out
     }
 
     /// Mask the API key for display. Keeps the prefix and last 4 chars.
@@ -393,19 +241,13 @@ fn is_valid_project_name(name: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
 }
 
-/// Quick sanity check for a cron expression: 5 whitespace-separated fields.
-/// We don't fully parse cron — the control plane does that authoritatively.
-fn is_plausible_cron(s: &str) -> bool {
-    s.split_whitespace().count() == 5
-}
-
 // --- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const FULL_VALID: &str = r#"
+    const MINIMAL: &str = r#"
 [project]
 name        = "my-mobility-app"
 api_key     = "atl_live_abcdef0123456789abcdef0123456789"
@@ -417,24 +259,6 @@ auth     = true
 geo      = true
 payments = true
 events   = true
-
-[auth]
-token_expiry_seconds = 3600
-geo_claims           = true
-
-[geo]
-default_radius_m     = 500
-elo_recompute_cron   = "0 3 * * *"
-location_ttl_hours   = 24
-
-[payments]
-currency             = "USD"
-settlement_mode      = "auto"
-idempotency_window_s = 86400
-
-[events]
-topics = ["location.updates", "fare.events", "auth.tokens", "safety.alerts"]
-retention_hours = 168
 "#;
 
     fn parse(toml_str: &str) -> Result<AtlasConfig, ConfigError> {
@@ -443,11 +267,11 @@ retention_hours = 168
 
     #[test]
     fn full_valid_config_parses() {
-        let cfg = parse(FULL_VALID).expect("should parse");
+        let cfg = parse(MINIMAL).expect("should parse");
         assert_eq!(cfg.project.name, "my-mobility-app");
         assert_eq!(cfg.project.environment, Environment::Production);
-        assert!(cfg.services.auth);
-        assert_eq!(cfg.events.unwrap().topics.len(), 4);
+        assert!(cfg.services.auth && cfg.services.geo);
+        assert!(cfg.deprecated_sections.is_empty());
     }
 
     #[test]
@@ -467,6 +291,35 @@ auth = true
         .expect("should parse minimal config");
         assert!(cfg.services.auth);
         assert!(!cfg.services.geo);
+    }
+
+    #[test]
+    fn deprecated_sections_are_accepted_with_a_warning() {
+        let cfg = parse(
+            r#"
+[project]
+name        = "app"
+api_key     = "atl_dev_xxxxxxxxxxxxxxxxxxxxxxxx"
+environment = "development"
+region      = "us-central1"
+
+[services]
+auth = true
+geo = true
+
+[auth]
+token_expiry_seconds = 3600
+geo_claims           = true
+
+[geo]
+default_radius_m   = 500
+location_ttl_hours = 24
+"#,
+        )
+        .expect("a removed section must not break an existing file");
+        assert!(cfg.services.auth);
+        // Both found sections are reported, in file order.
+        assert_eq!(cfg.deprecated_sections, vec!["auth", "geo"]);
     }
 
     #[test]
@@ -646,182 +499,6 @@ auth = true
                 "name {bad:?} should be rejected, got {err:?}"
             );
         }
-    }
-
-    #[test]
-    fn unknown_topic_is_rejected() {
-        let err = parse(
-            r#"
-[project]
-name        = "app"
-api_key     = "atl_dev_xxxxxxxxxxxxxxxxxxxxxxxx"
-environment = "development"
-region      = "us-central1"
-
-[services]
-events = true
-
-[events]
-topics = ["location.updates", "made.up.topic"]
-"#,
-        )
-        .unwrap_err();
-        match err {
-            ConfigError::Validation(msg) => assert!(msg.contains("made.up.topic")),
-            _ => panic!("expected Validation"),
-        }
-    }
-
-    #[test]
-    fn empty_topics_list_is_rejected() {
-        let err = parse(
-            r#"
-[project]
-name        = "app"
-api_key     = "atl_dev_xxxxxxxxxxxxxxxxxxxxxxxx"
-environment = "development"
-region      = "us-central1"
-
-[services]
-events = true
-
-[events]
-topics = []
-"#,
-        )
-        .unwrap_err();
-        assert!(matches!(err, ConfigError::Validation(_)));
-    }
-
-    #[test]
-    fn events_enabled_without_section_is_rejected() {
-        let err = parse(
-            r#"
-[project]
-name        = "app"
-api_key     = "atl_dev_xxxxxxxxxxxxxxxxxxxxxxxx"
-environment = "development"
-region      = "us-central1"
-
-[services]
-events = true
-"#,
-        )
-        .unwrap_err();
-        match err {
-            ConfigError::Validation(msg) => assert!(msg.contains("[events] section is required")),
-            _ => panic!("expected Validation"),
-        }
-    }
-
-    #[test]
-    fn bad_currency_is_rejected() {
-        for bad in ["usd", "DOLLARS", "U$D"] {
-            let toml = format!(
-                r#"
-[project]
-name        = "app"
-api_key     = "atl_dev_xxxxxxxxxxxxxxxxxxxxxxxx"
-environment = "development"
-region      = "us-central1"
-
-[services]
-payments = true
-
-[payments]
-currency = "{bad}"
-"#
-            );
-            let err = parse(&toml).unwrap_err();
-            assert!(
-                matches!(err, ConfigError::Validation(_)),
-                "currency {bad:?} should be rejected, got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn implausible_cron_is_rejected() {
-        let err = parse(
-            r#"
-[project]
-name        = "app"
-api_key     = "atl_dev_xxxxxxxxxxxxxxxxxxxxxxxx"
-environment = "development"
-region      = "us-central1"
-
-[services]
-geo = true
-
-[geo]
-elo_recompute_cron = "every night"
-"#,
-        )
-        .unwrap_err();
-        match err {
-            ConfigError::Validation(msg) => assert!(msg.contains("cron")),
-            _ => panic!("expected Validation"),
-        }
-    }
-
-    #[test]
-    fn token_expiry_bounds() {
-        // zero
-        let zero = parse(
-            r#"
-[project]
-name        = "app"
-api_key     = "atl_dev_xxxxxxxxxxxxxxxxxxxxxxxx"
-environment = "development"
-region      = "us-central1"
-
-[services]
-auth = true
-
-[auth]
-token_expiry_seconds = 0
-"#,
-        );
-        assert!(matches!(zero, Err(ConfigError::Validation(_))));
-
-        // too big
-        let huge = parse(
-            r#"
-[project]
-name        = "app"
-api_key     = "atl_dev_xxxxxxxxxxxxxxxxxxxxxxxx"
-environment = "development"
-region      = "us-central1"
-
-[services]
-auth = true
-
-[auth]
-token_expiry_seconds = 999999999
-"#,
-        );
-        assert!(matches!(huge, Err(ConfigError::Validation(_))));
-    }
-
-    #[test]
-    fn dangling_section_is_warning_not_error() {
-        let cfg = parse(
-            r#"
-[project]
-name        = "app"
-api_key     = "atl_dev_xxxxxxxxxxxxxxxxxxxxxxxx"
-environment = "development"
-region      = "us-central1"
-
-[services]
-auth = true
-
-[geo]
-default_radius_m = 500
-"#,
-        )
-        .expect("should parse — dangling [geo] is not fatal");
-        assert_eq!(cfg.dangling_sections(), vec!["geo"]);
     }
 
     #[test]

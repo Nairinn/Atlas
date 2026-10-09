@@ -93,7 +93,6 @@ dependencies {
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.junit.jupiter)
-    testImplementation(libs.kotlinx.coroutines.test)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 

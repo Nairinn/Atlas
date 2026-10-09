@@ -293,11 +293,10 @@ impl DeployResponse {
             });
         }
         if cfg.services.events {
-            let count = cfg.events.as_ref().map(|e| e.topics.len()).unwrap_or(0);
             provisioned.push(ProvisionedService {
                 service: "events".into(),
                 status: "ok".into(),
-                detail: Some(format!("{} topic(s)", count)),
+                detail: None,
             });
         }
         DeployResponse {
@@ -392,7 +391,8 @@ impl LogLine {
                 timestamp: "2026-05-26T15:42:17Z".into(),
                 service: "geo".into(),
                 level: "warn".into(),
-                message: "elo recompute deferred — db lock contention".into(),
+                message: "nearby query: spatial index bloat detected on idx_safety_votes_position"
+                    .into(),
             },
             LogLine {
                 timestamp: "2026-05-26T15:42:19Z".into(),

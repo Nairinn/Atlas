@@ -114,7 +114,6 @@ dependencies {
     testImplementation(libs.kotlin.test)
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.kotlinx.coroutines.test)
-    testImplementation(libs.grpc.testing)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 

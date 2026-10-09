@@ -82,9 +82,9 @@ pub struct NearbyParams {
     pub lat: f64,
     pub lng: f64,
     pub radius_m: f64,
-    /// "driver" | "walker". Free-form: geo-engine uses it only as a
-    /// metrics label, so the gateway does not enumerate the values, it
-    /// just bounds the length before sending them on.
+    /// "driver" | "walker", mapped onto the proto enum; anything else is
+    /// ROLE_UNKNOWN. geo-engine uses it only as a metrics label, and the
+    /// enum keeps that label's cardinality bounded by construction.
     pub role: Option<String>,
     pub limit: Option<u32>,
 }
@@ -120,10 +120,11 @@ async fn nearby(
             lat: params.lat,
             lng: params.lng,
             radius_m: radius,
-            role: params
-                .role
-                .map(|r| r.chars().take(16).collect())
-                .unwrap_or_default(),
+            role: match params.role.as_deref() {
+                Some("driver") => crate::pb::geo::Role::Driver as i32,
+                Some("walker") => crate::pb::geo::Role::Walker as i32,
+                _ => crate::pb::geo::Role::Unknown as i32,
+            },
             limit: validate::nearby_limit(params.limit),
         }))
         .await
@@ -207,7 +208,6 @@ async fn score_route(
         .clone()
         .score_route(Request::new(RouteScoreRequest {
             project_id: user.project_id,
-            user_id: user.user_id,
             candidates: body
                 .candidates
                 .into_iter()

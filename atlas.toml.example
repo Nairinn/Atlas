@@ -14,22 +14,7 @@ geo      = true
 payments = true
 events   = true
 
-[auth]
-token_expiry_seconds = 3600
-geo_claims           = true
-
-[geo]
-default_radius_m     = 500
-location_ttl_hours   = 24
-
-[payments]
-currency             = "USD"
-settlement_mode      = "auto"      # auto | manual
-idempotency_window_s = 86400
-
-[events]
-# Short topic names. The platform prepends `atlas.` internally.
-# Known topics: location.updates, fare.events, auth.tokens, safety.alerts
-# (elo.recompute is also accepted but reserved: nothing produces or consumes it)
-topics          = ["location.updates", "fare.events", "auth.tokens", "safety.alerts"]
-retention_hours = 168
+# The old [auth], [geo], [payments], and [events] tuning sections were
+# removed: nothing on the platform ever read them, so validating them was
+# config-shaped optimism. `atlas validate` warns if your file still has
+# one; delete it at your leisure.

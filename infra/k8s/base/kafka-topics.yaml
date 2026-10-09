@@ -61,16 +61,3 @@ spec:
   config:
     retention.ms: 604800000       # 7d — safety alerts kept for incident review
     cleanup.policy: delete
----
-apiVersion: kafka.strimzi.io/v1beta2
-kind: KafkaTopic
-metadata:
-  name: atlas.elo.recompute
-  labels:
-    strimzi.io/cluster: atlas-kafka
-spec:
-  partitions: 3
-  replicas: 1
-  config:
-    retention.ms: 86400000        # 24h
-    cleanup.policy: delete

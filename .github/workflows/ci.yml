@@ -247,9 +247,7 @@ jobs:
         run: python3 scripts/check-alert-metrics.py
 
       # A spec that has drifted is worse than no spec: people trust it and
-      # generate clients from it. Drift is also invisible at review time —
-      # nothing in a router diff reminds you that docs/openapi.yaml
-      # describes the same surface.
+      # generate clients from it. Drift is also invisible at review time.
       # An SDK that silently lags the API looks finished, so nobody
       # notices the missing endpoint until a user reaches for a raw HTTP
       # client instead.

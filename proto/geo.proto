@@ -36,12 +36,20 @@ message LocationUpdate {
 
 message LocationAck { bool ok = 1; }
 
+enum Role {
+  // proto3's zero value: an unset field and an unrecognized one both land
+  // here, which is exactly the label the metric wants.
+  ROLE_UNKNOWN = 0;
+  DRIVER = 1;
+  WALKER = 2;
+}
+
 message NearbyRequest {
   string requester_user_id = 1;
   double lat = 2;
   double lng = 3;
   double radius_m = 4;
-  string role = 5; // "driver" | "walker"
+  Role role = 5;
   // 0 means default 20, max 100. Enforced in the service layer.
   uint32 limit = 6;
   string project_id = 7;
@@ -65,8 +73,12 @@ message NearbyUser {
 
 message NearbyResponse { repeated NearbyUser users = 1; }
 
+// `user_id` is reserved: nothing ever read it (route scoring is per
+// project, not per user), and an unused identity field on an internal
+// RPC is an invitation to trust it someday.
 message RouteScoreRequest {
-  string user_id = 1;
+  reserved 1;
+  reserved "user_id";
   repeated RouteCandidate candidates = 2;
   string project_id = 3;
 }

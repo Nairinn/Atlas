@@ -13,7 +13,10 @@ option java_package = "atlas.events";
 //   atlas.fare.events      -> FareEvent
 //   atlas.auth.tokens      -> AuthTokenEvent
 //   atlas.safety.alerts    -> SafetyAlertEvent
-//   atlas.elo.recompute    -> EloRecomputeEvent
+//
+// (atlas.elo.recompute and EloRecomputeEvent are reserved below: the ELO
+// scoring design was dropped in favour of direct vote aggregation before
+// anything ever produced or consumed the event.)
 
 // Every event carries the project it happened in.
 //
@@ -78,16 +81,11 @@ message SafetyAlertEvent {
   }
 }
 
+// The ELO recompute event is gone: the scoring design was dropped in
+// favour of direct vote aggregation before anything produced or consumed
+// it. The empty shell keeps the NAME out of future reuse, and the field
+// numbers are reserved so a revived message cannot renumber them.
 message EloRecomputeEvent {
-  repeated string segment_ids = 1;
-  TriggerType trigger_type = 2;
-  int64  occurred_at = 3;
-  string project_id = 4;
-
-  enum TriggerType {
-    UNKNOWN = 0;
-    NIGHTLY_BATCH = 1;
-    NEW_VOTE = 2;
-    MANUAL = 3;
-  }
+  reserved 1, 2, 3, 4;
+  reserved "segment_ids", "trigger_type", "occurred_at", "project_id";
 }

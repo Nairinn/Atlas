@@ -1,7 +1,6 @@
-# Workspace root for all Rust services and consumers in Atlas.
+# Cargo workspace root for all Rust services, consumers, and the CLI.
 #
-# Member crates are added as each phase lands. Phase 1 ships the workspace
-# definition with no members yet so `cargo` commands run cleanly at the root.
+# Members live in services/, consumers/, tools/, and crates/.
 
 [workspace]
 resolver = "2"
@@ -43,7 +42,6 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono", "macros", "migrate"] }
 rdkafka = { version = "0.36", features = ["tokio"] }
 prost = "0.13"
-prost-types = "0.13"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -67,7 +65,6 @@ owo-colors = "4"
 # GCRA rate limiting. A well-tested crate rather than a hand-rolled bucket:
 # limiter arithmetic is security-sensitive and an off-by-one is a bypass.
 governor = "0.6"
-nonzero_ext = "0.3"
 
 [profile.release]
 lto = "thin"

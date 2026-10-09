@@ -10,8 +10,11 @@ use std::path::Path;
 pub fn run(config_path: &Path, format: Format) -> Result<()> {
     let cfg = AtlasConfig::load(config_path)?;
 
+    // The per-service tuning sections ([auth], [geo], ...) were removed;
+    // they are accepted for one release so existing files keep working.
+    let deprecated = cfg.deprecated_sections.clone();
+
     if format == Format::Json {
-        let dangling = cfg.dangling_sections();
         let summary = json!({
             "ok": true,
             "project": {
@@ -26,7 +29,12 @@ pub fn run(config_path: &Path, format: Format) -> Result<()> {
                 "payments": cfg.services.payments,
                 "events": cfg.services.events,
             },
-            "warnings": dangling.iter().map(|s| format!("[{}] section is present but services.{} = false", s, s)).collect::<Vec<_>>(),
+            "warnings": deprecated
+                .iter()
+                .map(|s| format!(
+                    "[{s}] section is deprecated and ignored: the platform never read it; remove it"
+                ))
+                .collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
@@ -41,76 +49,31 @@ pub fn run(config_path: &Path, format: Format) -> Result<()> {
     );
 
     if cfg.services.auth {
-        if let Some(a) = &cfg.auth {
-            println!(
-                "{} auth: enabled (geo claims {}, {}s expiry)",
-                "✓".green(),
-                if a.geo_claims { "on" } else { "off" },
-                a.token_expiry_seconds
-            );
-        } else {
-            println!("{} auth: enabled (defaults)", "✓".green());
-        }
+        println!("{} auth: enabled", "✓".green());
     }
-
     if cfg.services.geo {
-        if let Some(g) = &cfg.geo {
-            println!(
-                "{} geo: enabled ({}m default radius, ELO cron `{}`)",
-                "✓".green(),
-                g.default_radius_m,
-                g.elo_recompute_cron
-            );
-        } else {
-            println!("{} geo: enabled (defaults)", "✓".green());
-        }
+        println!("{} geo: enabled", "✓".green());
     }
-
     if cfg.services.payments {
-        if let Some(p) = &cfg.payments {
-            let mode = match p.settlement_mode {
-                crate::config::SettlementMode::Auto => "auto",
-                crate::config::SettlementMode::Manual => "manual",
-            };
-            println!(
-                "{} payments: enabled ({}, {} settlement)",
-                "✓".green(),
-                p.currency,
-                mode
-            );
-        } else {
-            println!("{} payments: enabled (defaults)", "✓".green());
-        }
+        println!("{} payments: enabled", "✓".green());
     }
-
     if cfg.services.events {
-        if let Some(e) = &cfg.events {
-            println!(
-                "{} events: enabled ({} topic{}, {}h retention)",
-                "✓".green(),
-                e.topics.len(),
-                if e.topics.len() == 1 { "" } else { "s" },
-                e.retention_hours
-            );
-        }
+        println!("{} events: enabled", "✓".green());
     }
 
-    let warnings = cfg.dangling_sections();
-    for w in &warnings {
+    for name in &deprecated {
         println!(
-            "{} [{}] section is present but services.{} = false",
+            "{} [{name}] section is deprecated and ignored: the platform never read it; remove it",
             "!".yellow(),
-            w,
-            w
         );
     }
 
-    if warnings.is_empty() {
+    if deprecated.is_empty() {
         println!("\n{}", "All good.".green().bold());
     } else {
         println!(
             "\n{}",
-            format!("Valid, with {} warning(s).", warnings.len())
+            format!("Valid, with {} deprecation warning(s).", deprecated.len())
                 .yellow()
                 .bold()
         );

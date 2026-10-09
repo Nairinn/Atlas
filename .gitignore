@@ -23,10 +23,9 @@ Thumbs.db
 
 # Node / Flutter (clients)
 node_modules/
-clients/wayfinder-web/dist/
-clients/wayfinder-web/.next/
-clients/haggle-mobile/.dart_tool/
-clients/haggle-mobile/build/
+# Python byte-cache from the parity scripts.
+__pycache__/
+*.pyc
 
 # Local env
 .env
