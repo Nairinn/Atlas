@@ -21,10 +21,10 @@ use uuid::Uuid;
 
 use crate::auth::AuthedKey;
 use crate::error::ApiError;
-use crate::keys as keygen;
 use crate::models::{ApiKeyView, CreateKeyRequest, CreatedKeyResponse};
 use crate::routes::projects::{resolve_project, rfc3339};
 use crate::state::AppState;
+use atlas_keys as keygen;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

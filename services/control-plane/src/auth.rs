@@ -17,8 +17,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::keys;
 use crate::state::AppState;
+use atlas_keys as keys;
 
 /// A caller whose key was resolved this request.
 #[derive(Debug, Clone)]

@@ -27,9 +27,9 @@ use axum::{routing::post, Json, Router};
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::keys;
 use crate::models::{CreateAccountRequest, CreateAccountResponse};
 use crate::state::AppState;
+use atlas_keys as keys;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/accounts", post(create_account))
