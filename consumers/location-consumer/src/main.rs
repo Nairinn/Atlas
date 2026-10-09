@@ -53,30 +53,8 @@ async fn main() -> anyhow::Result<()> {
 
     let kafka = consumer::build(&cfg.kafka_brokers, &cfg.consumer_group)
         .context("building kafka consumer")?;
-    consumer::run(kafka, &cfg.topic, shutdown_signal()).await;
+    consumer::run(kafka, &cfg.topic, atlas_edge::shutdown::shutdown_signal()).await;
 
     info!("atlas-location-consumer exited cleanly");
     Ok(())
-}
-
-/// Wait for SIGTERM (k8s rolling deploy) or SIGINT (local ctrl-c).
-async fn shutdown_signal() {
-    use tokio::signal;
-    let ctrl_c = async {
-        signal::ctrl_c().await.ok();
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
 }

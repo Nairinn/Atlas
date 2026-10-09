@@ -48,33 +48,10 @@ async fn main() -> anyhow::Result<()> {
     Server::builder()
         .add_service(health_service)
         .add_service(pb::geo::geo_engine_server::GeoEngineServer::new(svc))
-        .serve_with_shutdown(cfg.grpc_addr, shutdown_signal())
+        .serve_with_shutdown(cfg.grpc_addr, atlas_edge::shutdown::shutdown_signal())
         .await
         .context("tonic server")?;
 
     info!("atlas-geo-engine exited cleanly");
     Ok(())
-}
-
-/// Wait for SIGTERM (k8s rolling deploy) or SIGINT (local ctrl-c).
-async fn shutdown_signal() {
-    use tokio::signal;
-    let ctrl_c = async {
-        signal::ctrl_c().await.ok();
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-    info!("shutdown signal received");
 }

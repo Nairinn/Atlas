@@ -186,10 +186,9 @@ name = "atlas-geo-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum 0.7.9",
+ "atlas-edge",
  "chrono",
  "metrics",
- "metrics-exporter-prometheus",
  "prost",
  "prost-build",
  "rdkafka",
@@ -219,10 +218,9 @@ name = "atlas-location-consumer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum 0.7.9",
+ "atlas-edge",
  "chrono",
  "metrics",
- "metrics-exporter-prometheus",
  "prost",
  "prost-build",
  "rdkafka",
@@ -251,10 +249,9 @@ name = "atlas-safety-consumer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum 0.7.9",
+ "atlas-edge",
  "chrono",
  "metrics",
- "metrics-exporter-prometheus",
  "prost",
  "prost-build",
  "rdkafka",
