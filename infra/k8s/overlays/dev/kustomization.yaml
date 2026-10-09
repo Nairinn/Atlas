@@ -6,6 +6,11 @@ namespace: atlas
 resources:
   - ../../base
 
+# Injects the shared wait-for-schema initContainer into every Deployment
+# that touches Postgres (the base manifests no longer carry it inline).
+components:
+  - ../../components/wait-for-schema
+
 # One of everything. A dev cluster is for finding out whether the manifests
 # work, not for absorbing load.
 replicas:

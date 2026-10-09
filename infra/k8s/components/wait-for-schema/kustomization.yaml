@@ -1,0 +1,194 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Shared wait-for-schema initContainer. Every Deployment that touches
+# Postgres used to carry a copy; the only per-Deployment difference is
+# the DATABASE_URL secret key, which each patch below supplies. A
+# Component (rather than an overlay) because dev and prod both need it.
+# The deploy step pins the image tag (see overlays/prod).
+patches:
+  # Strategic merge (not JSON6902): a merge patch creates the
+  # initContainers list where absent and merges by name where present,
+  # which is what "the base no longer carries it" needs.
+  - target:
+      kind: Deployment
+      name: auth-service
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: auth-service
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: wait-for-schema
+                image: ghcr.io/nairinn/atlas-migrator:latest
+                args: ["status", "--check"]
+                env:
+                  - name: DATABASE_URL
+                    valueFrom:
+                      secretKeyRef: { name: atlas-secrets, key: auth-db-url }
+                resources:
+                  requests: { cpu: 25m, memory: 32Mi }
+                  limits: { memory: 128Mi }
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: { drop: ["ALL"] }
+  - target:
+      kind: Deployment
+      name: geo-engine
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: geo-engine
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: wait-for-schema
+                image: ghcr.io/nairinn/atlas-migrator:latest
+                args: ["status", "--check"]
+                env:
+                  - name: DATABASE_URL
+                    valueFrom:
+                      secretKeyRef: { name: atlas-secrets, key: geo-db-url }
+                resources:
+                  requests: { cpu: 25m, memory: 32Mi }
+                  limits: { memory: 128Mi }
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: { drop: ["ALL"] }
+  - target:
+      kind: Deployment
+      name: payments-service
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: payments-service
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: wait-for-schema
+                image: ghcr.io/nairinn/atlas-migrator:latest
+                args: ["status", "--check"]
+                env:
+                  - name: DATABASE_URL
+                    valueFrom:
+                      secretKeyRef: { name: atlas-secrets, key: payments-db-url }
+                resources:
+                  requests: { cpu: 25m, memory: 32Mi }
+                  limits: { memory: 128Mi }
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: { drop: ["ALL"] }
+  - target:
+      kind: Deployment
+      name: control-plane
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: control-plane
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: wait-for-schema
+                image: ghcr.io/nairinn/atlas-migrator:latest
+                args: ["status", "--check"]
+                env:
+                  - name: DATABASE_URL
+                    valueFrom:
+                      secretKeyRef: { name: atlas-secrets, key: control-db-url }
+                resources:
+                  requests: { cpu: 25m, memory: 32Mi }
+                  limits: { memory: 128Mi }
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: { drop: ["ALL"] }
+  - target:
+      kind: Deployment
+      name: location-consumer
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: location-consumer
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: wait-for-schema
+                image: ghcr.io/nairinn/atlas-migrator:latest
+                args: ["status", "--check"]
+                env:
+                  - name: DATABASE_URL
+                    valueFrom:
+                      secretKeyRef: { name: atlas-secrets, key: geo-db-url }
+                resources:
+                  requests: { cpu: 25m, memory: 32Mi }
+                  limits: { memory: 128Mi }
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: { drop: ["ALL"] }
+  - target:
+      kind: Deployment
+      name: safety-consumer
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: safety-consumer
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: wait-for-schema
+                image: ghcr.io/nairinn/atlas-migrator:latest
+                args: ["status", "--check"]
+                env:
+                  - name: DATABASE_URL
+                    valueFrom:
+                      secretKeyRef: { name: atlas-secrets, key: geo-db-url }
+                resources:
+                  requests: { cpu: 25m, memory: 32Mi }
+                  limits: { memory: 128Mi }
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: { drop: ["ALL"] }
+  - target:
+      kind: Deployment
+      name: fare-consumer
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: fare-consumer
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: wait-for-schema
+                image: ghcr.io/nairinn/atlas-migrator:latest
+                args: ["status", "--check"]
+                env:
+                  - name: DATABASE_URL
+                    valueFrom:
+                      secretKeyRef: { name: atlas-secrets, key: payments-db-url }
+                resources:
+                  requests: { cpu: 25m, memory: 32Mi }
+                  limits: { memory: 128Mi }
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: { drop: ["ALL"] }

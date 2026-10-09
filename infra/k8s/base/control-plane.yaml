@@ -52,21 +52,6 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      initContainers:
-        - name: wait-for-schema
-          image: ghcr.io/nairinn/atlas-migrator:latest
-          args: ["status", "--check"]
-          env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef: { name: atlas-secrets, key: control-db-url }
-          resources:
-            requests: { cpu: 25m, memory: 32Mi }
-            limits: { memory: 128Mi }
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: { drop: ["ALL"] }
       containers:
         - name: control-plane
           image: ghcr.io/nairinn/atlas-control-plane:latest

@@ -6,6 +6,11 @@ namespace: atlas
 resources:
   - ../../base
 
+# Injects the shared wait-for-schema initContainer into every Deployment
+# that touches Postgres (the base manifests no longer carry it inline).
+components:
+  - ../../components/wait-for-schema
+
 # The base is already sized for production, so this overlay adds placement
 # and durability constraints rather than changing counts.
 #
@@ -28,6 +33,169 @@ resources:
 # The `latest` tag is deliberately NOT overridden in this file: a tag
 # committed to the repo would go stale the moment main moved, and a stale
 # pin is worse than none because it looks like a pin.
+
+# Kafka topics in prod: 3 replicas and a write quorum. min.insync.replicas=2
+# means a produce acks=all fails rather than persists single-copy when one
+# broker is down — the money events on atlas.fare.events deserve that.
+patches:
+  - target:
+      kind: KafkaTopic
+      labelSelector: strimzi.io/cluster=atlas-kafka
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: add
+        path: /spec/config/min.insync.replicas
+        value: 2
+
+  # Spread every replica across zones. Without this the scheduler is free
+  # to put all replicas of a service in one zone, and a zonal outage takes
+  # that whole service with it. whenUnsatisfiable: ScheduleAnyway, not
+  # DoNotSchedule — during a zonal outage it is better to run unbalanced
+  # than to refuse to schedule.
+  # Four explicit patches rather than one selector-based one: the spread
+  # constraint's own labelSelector must name exactly one service (it
+  # counts only that service's pods), and kustomize replacements cannot
+  # stamp a per-target name into a shared patch.
+  - target:
+      kind: Deployment
+      name: gateway
+    patch: |-
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: gateway
+  - target:
+      kind: Deployment
+      name: geo-engine
+    patch: |-
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: geo-engine
+  - target:
+      kind: Deployment
+      name: auth-service
+    patch: |-
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: auth-service
+  - target:
+      kind: Deployment
+      name: payments-service
+    patch: |-
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: payments-service
+
+# Kafka topics in prod: 3 replicas and a write quorum. min.insync.replicas=2
+# means a produce acks=all fails rather than persists single-copy when one
+# broker is down — the money events on atlas.fare.events deserve that.
+patches:
+  - target:
+      kind: KafkaTopic
+      labelSelector: strimzi.io/cluster=atlas-kafka
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: add
+        path: /spec/config/min.insync.replicas
+        value: 2
+
+  # Spread every replica across zones. Without this the scheduler is free
+  # to put all three gateway pods in one zone, and a zonal outage takes the
+  # whole front door with it. One patch covers all four services; the
+  # per-service labelSelector inside each constraint is injected from the
+  # Deployment's own name by the replacement below (a spread constraint
+  # must count only its own service's pods, or one service can bunch up
+  # while the namespace total looks balanced).
+  # whenUnsatisfiable: ScheduleAnyway, not DoNotSchedule — during a zonal
+  # outage it is better to run unbalanced than to refuse to schedule.
+  - target:
+      kind: Deployment
+      name: "^(gateway|geo-engine|auth-service|payments-service)$"
+    patch: |-
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: REPLACE_WITH_DEPLOYMENT_NAME
+
+# Kafka topics in prod: 3 replicas and a write quorum. min.insync.replicas=2
+# means a produce acks=all fails rather than persists single-copy when one
+# broker is down — the money events on atlas.fare.events deserve that.
+patches:
+  - target:
+      kind: KafkaTopic
+      labelSelector: strimzi.io/cluster=atlas-kafka
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: add
+        path: /spec/config/min.insync.replicas
+        value: 2
+
+  # Spread every replica across zones. Without this the scheduler is free
+  # to put all three gateway pods in one zone, and a zonal outage takes the
+  # whole front door with it. One selector-based patch covers all four;
+  # whenUnsatisfiable: ScheduleAnyway, not DoNotSchedule — during a zonal
+  # outage it is better to run unbalanced than to refuse to schedule.
+  - target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/component=backend
+    patch: |-
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: ${candidate}
+  # gateway is the edge, not a backend: spread it too, but its own selector.
+  - target:
+      kind: Deployment
+      name: gateway
+    patch: |-
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: gateway
 
 # Kafka topics in prod: 3 replicas and a write quorum. min.insync.replicas=2
 # means a produce acks=all fails rather than persists single-copy when one
@@ -105,3 +273,4 @@ patches:
             labelSelector:
               matchLabels:
                 app.kubernetes.io/name: payments-service
+

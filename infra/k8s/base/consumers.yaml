@@ -43,21 +43,6 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      initContainers:
-        - name: wait-for-schema
-          image: ghcr.io/nairinn/atlas-migrator:latest
-          args: ["status", "--check"]
-          env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef: { name: atlas-secrets, key: geo-db-url }
-          resources:
-            requests: { cpu: 25m, memory: 32Mi }
-            limits: { memory: 128Mi }
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: { drop: ["ALL"] }
       containers:
         - name: location-consumer
           image: ghcr.io/nairinn/atlas-location-consumer:latest
@@ -124,21 +109,6 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      initContainers:
-        - name: wait-for-schema
-          image: ghcr.io/nairinn/atlas-migrator:latest
-          args: ["status", "--check"]
-          env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef: { name: atlas-secrets, key: geo-db-url }
-          resources:
-            requests: { cpu: 25m, memory: 32Mi }
-            limits: { memory: 128Mi }
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: { drop: ["ALL"] }
       containers:
         - name: safety-consumer
           image: ghcr.io/nairinn/atlas-safety-consumer:latest
@@ -205,21 +175,6 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      initContainers:
-        - name: wait-for-schema
-          image: ghcr.io/nairinn/atlas-migrator:latest
-          args: ["status", "--check"]
-          env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef: { name: atlas-secrets, key: payments-db-url }
-          resources:
-            requests: { cpu: 25m, memory: 32Mi }
-            limits: { memory: 128Mi }
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: { drop: ["ALL"] }
       containers:
         - name: fare-consumer
           image: ghcr.io/nairinn/atlas-fare-consumer:latest
