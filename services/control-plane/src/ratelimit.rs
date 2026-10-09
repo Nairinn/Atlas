@@ -1,69 +1,55 @@
-//! Request rate limiting for the control plane.
+//! Request rate limiting: the control plane's vocabulary over the shared
+//! atlas-edge limiter core.
 //!
-//! # What this does and does not protect
+//! The GCRA machinery, key derivation, and the per-address anti-rotation
+//! ceiling live in `atlas_edge::ratelimit`; this module owns what is
+//! control-plane-specific: the signup quota and what the 429 body looks
+//! like. The per-replica caveat (N pods behind a balancer is N times the
+//! configured rate) is documented in the shared crate.
 //!
-//! This is **per-replica**, in-process limiting. With three gateway pods a
-//! configured 60/min is effectively 180/min globally, because a client's
-//! requests are spread across replicas by the load balancer. That is
-//! deliberate rather than overlooked: a globally exact limit needs shared
-//! state (Redis) on the hot path of every request, which is a latency and
-//! an availability cost this does not yet justify.
-//!
-//! Treat it as the layer that stops one client from exhausting one replica,
-//! sitting underneath the ingress rate limit which is the real global cap.
-//! Both are worth having — the ingress limit disappears the moment anything
-//! reaches the service by another route, which is exactly the situation
-//! in-process limiting covers.
-//!
-//! # The endpoint this exists for
+//! # The endpoint the strict quota exists for
 //!
 //! `POST /v1/accounts` is the only unauthenticated write in the platform
-//! and it mints an API key. Unthrottled, anyone who can reach the port can
-//! create unlimited accounts and credentials. Its quota is deliberately
-//! tiny — signing up is a once-per-person action, not an API call.
+//! and it mints an API key. Unthrottled, anyone who can reach the port
+//! can create unlimited accounts and credentials. Its quota is
+//! deliberately tiny — signing up is a once-per-person action, not an
+//! API call.
 //!
 //! # Keying
 //!
-//! Authenticated requests are keyed by a digest of the bearer token, not by
-//! IP. Behind carrier-grade NAT or a corporate egress, thousands of
-//! legitimate users share one address, and an IP-keyed limit would throttle
-//! all of them together while doing nothing about a single attacker
-//! rotating addresses.
-//!
-//! Unauthenticated requests have nothing else to key on, so they use the
-//! client address — see [`client_key`] for why that address is not simply
-//! taken from `X-Forwarded-For`.
+//! Control-plane callers are CLIs and CI runners that frequently share
+//! an egress address, so authenticated requests are keyed by a digest of
+//! the API key; keying those by IP would throttle a whole office
+//! together. Unauthenticated requests key on the client address.
 
-use std::net::{IpAddr, SocketAddr};
-use std::num::NonZeroU32;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use atlas_edge::ratelimit as core;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use governor::clock::{Clock, DefaultClock};
-use governor::state::keyed::DefaultKeyedStateStore;
-use governor::{Quota, RateLimiter};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
-type Keyed = RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>;
+/// The control plane's one strict-quota profile: account creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictProfile {
+    Signup,
+}
 
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
-    /// Requests per minute for ordinary authenticated traffic.
     pub default_per_minute: u32,
     /// Requests per minute for account creation, per client address.
     /// Deliberately tiny: signing up is a once-per-person action.
     pub signup_per_minute: u32,
     /// Per-address requests per minute applied to every non-exempt
-    /// request. The anti-rotation cap: without it a client minting fresh
-    /// bearer strings gets a fresh token bucket per request.
+    /// request. The anti-rotation cap.
     pub ip_ceiling_per_minute: u32,
-    /// How many proxies sit in front of this service. See [`client_key`].
+    /// How many proxies sit in front of this service.
     pub trusted_proxy_hops: usize,
     pub enabled: bool,
 }
@@ -74,8 +60,8 @@ impl Default for RateLimitConfig {
             // The CLI makes a handful of calls per invocation, so this is
             // generous for a human and still bounds a runaway script.
             default_per_minute: 120,
-            // Three signups a minute from one address. A person creating a
-            // second account for a colleague is fine; a script is not.
+            // Three signups a minute from one address. A person creating
+            // a second account for a colleague is fine; a script is not.
             signup_per_minute: 3,
             // CLI traffic is a handful of calls per invocation; an order
             // of magnitude above the per-key quota covers an office of
@@ -87,63 +73,67 @@ impl Default for RateLimitConfig {
     }
 }
 
+impl RateLimitConfig {
+    fn into_core(self) -> core::Quotas<StrictProfile> {
+        core::Quotas {
+            default_per_minute: self.default_per_minute,
+            ip_ceiling_per_minute: self.ip_ceiling_per_minute,
+            trusted_proxy_hops: self.trusted_proxy_hops,
+            enabled: self.enabled,
+            strict: vec![(StrictProfile::Signup, self.signup_per_minute)],
+        }
+    }
+}
+
 pub struct Limiters {
-    default: Keyed,
-    signup: Keyed,
-    /// Per-address cap on every non-exempt request; see the config field.
-    ip_ceiling: Keyed,
-    config: RateLimitConfig,
+    inner: Arc<core::Limiters<StrictProfile>>,
 }
 
 impl Limiters {
     pub fn new(config: RateLimitConfig) -> Arc<Self> {
-        let quota = |per_minute: u32| {
-            let n = NonZeroU32::new(per_minute.max(1)).expect("nonzero");
-            // Burst equal to the per-minute rate: GCRA refills continuously,
-            // so this allows a short spike then settles to the steady rate,
-            // which matches how a real client opening a screen behaves.
-            Quota::per_minute(n).allow_burst(n)
-        };
         Arc::new(Self {
-            default: RateLimiter::keyed(quota(config.default_per_minute)),
-            signup: RateLimiter::keyed(quota(config.signup_per_minute)),
-            ip_ceiling: RateLimiter::keyed(quota(config.ip_ceiling_per_minute)),
-            config,
+            inner: core::Limiters::new(config.into_core()),
         })
     }
 
-    /// Drop buckets for keys that have not been seen recently.
-    ///
-    /// Without this the key map grows for every distinct IP or token
-    /// forever, which turns the rate limiter itself into a memory
-    /// exhaustion vector — the opposite of its job.
-    pub fn retain_recent(&self) {
-        self.default.retain_recent();
-        self.signup.retain_recent();
-        self.ip_ceiling.retain_recent();
+    pub fn spawn_gc(self: &Arc<Self>) {
+        self.inner.spawn_gc();
     }
 
-    /// Spawn the periodic sweep. Cheap: it walks only live keys.
-    pub fn spawn_gc(self: &Arc<Self>) {
-        let limiters = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                tick.tick().await;
-                limiters.retain_recent();
-            }
-        });
+    fn check(
+        &self,
+        peer: Option<SocketAddr>,
+        headers: &HeaderMap,
+        path: &str,
+    ) -> Result<(), Duration> {
+        if !self.inner.quotas().enabled {
+            return Ok(());
+        }
+        let signup = is_signup_path(path);
+        let ip_key = client_key(headers, peer, self.inner.quotas().trusted_proxy_hops);
+        self.inner.check_ip_ceiling(&ip_key)?;
+
+        // Signup has no credential to key on by definition, so it is
+        // keyed by address. Everything else prefers the API key.
+        let key = if signup {
+            ip_key
+        } else {
+            token_key(headers).unwrap_or_else(|| {
+                client_key(headers, peer, self.inner.quotas().trusted_proxy_hops)
+            })
+        };
+        let profile = if signup {
+            Some(&StrictProfile::Signup)
+        } else {
+            None
+        };
+        self.inner.check_primary(profile, &key)
     }
 }
 
-/// Paths that must never be throttled.
-///
-/// Kubernetes probes this replica on a fixed interval regardless of load.
-/// Rate limiting the liveness probe means a busy pod starts failing it,
-/// gets restarted, sheds its traffic onto its peers, and pushes them over
-/// the same limit — a limiter that converts a load spike into a rolling
-/// outage. The probes are also cheap and unauthenticated by design, so
-/// there is nothing to protect here.
+/// Paths that must never be throttled (Kubernetes probes; see the
+/// gateway's module for why limiting them converts load spikes into
+/// rolling outages).
 fn is_exempt_path(path: &str) -> bool {
     path == "/healthz" || path == "/readyz"
 }
@@ -155,68 +145,25 @@ fn is_signup_path(path: &str) -> bool {
     path == "/v1/accounts"
 }
 
-/// Build the limiter key for a request.
-///
-/// # Why the client address is not just `X-Forwarded-For[0]`
-///
-/// `X-Forwarded-For` is client-supplied. Anyone can send
-/// `X-Forwarded-For: 1.2.3.4` and, if the first entry is trusted, get a
-/// fresh rate-limit bucket per forged value — which defeats the limiter
-/// entirely and is a worse position than not having one, because it looks
-/// protected.
-///
-/// The only safe read is to count back from the right by the number of
-/// proxies you actually run: each appends the address it saw, so the
-/// (hops+1)-th from the end is the last address a trusted proxy observed.
-/// `trusted_proxy_hops = 0` means no proxy is trusted and the socket peer
-/// address is used, which is correct for direct exposure and for tests.
-pub fn client_key(
-    headers: &HeaderMap,
-    peer: Option<SocketAddr>,
-    trusted_proxy_hops: usize,
-) -> String {
-    if trusted_proxy_hops > 0 {
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            let hops: Vec<&str> = xff
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect();
-            // hops.len() - trusted_proxy_hops is the index of the address the
-            // outermost trusted proxy saw. A shorter list than expected means
-            // the request did not traverse the proxies we think it did, so
-            // fall through to the peer address rather than trusting it.
-            if let Some(idx) = hops.len().checked_sub(trusted_proxy_hops) {
-                if let Some(addr) = hops.get(idx) {
-                    if let Ok(ip) = addr.parse::<IpAddr>() {
-                        return format!("ip:{ip}");
-                    }
-                }
-            }
-        }
-    }
-    match peer {
-        Some(addr) => format!("ip:{}", addr.ip()),
-        // Only reachable when ConnectInfo is absent, which in practice means
-        // a test harness driving the router directly.
-        None => "ip:unknown".to_string(),
-    }
+/// Address key: X-Forwarded-For read from the right by trusted hops (see
+/// the shared crate for why the leftmost entry is never trusted).
+pub fn client_key(headers: &HeaderMap, peer: Option<SocketAddr>, hops: usize) -> String {
+    core::client_key(
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+        peer,
+        hops,
+    )
 }
 
-/// Key authenticated requests by a digest of the API key.
-///
-/// Hashed rather than used raw so a live credential is not sitting in a map
-/// key in memory, and truncated because 16 hex characters is ample to keep
-/// buckets distinct.
+/// Token key: digest of the parsed API key bearer, so a live credential
+/// is not sitting in a map key in memory.
 fn token_key(headers: &HeaderMap) -> Option<String> {
     let header = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
         .ok()?;
     let token = crate::auth::parse_bearer(header).ok()?;
-    let digest = Sha256::digest(token.as_bytes());
-    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    Some(format!("tok:{hex}"))
+    core::token_key(Some(token))
 }
 
 pub async fn layer(
@@ -228,8 +175,8 @@ pub async fn layer(
     check(&limiters, Some(peer), req, next).await
 }
 
-/// Same as [`layer`] but without `ConnectInfo`, for the test harness and for
-/// any deployment where the listener does not provide a peer address.
+/// Same as [`layer`] but without `ConnectInfo`, for the test harness and
+/// for any deployment where the listener does not provide a peer address.
 pub async fn layer_without_peer(
     State(limiters): State<Arc<Limiters>>,
     req: Request,
@@ -244,57 +191,20 @@ async fn check(
     req: Request,
     next: Next,
 ) -> Response {
-    if !limiters.config.enabled {
-        return next.run(req).await;
-    }
-
     let path = req.uri().path().to_string();
     if is_exempt_path(&path) {
         return next.run(req).await;
     }
-    let signup = is_signup_path(&path);
-
-    // Per-address ceiling on every non-exempt request, so rotating bearer
-    // strings cannot mint fresh token buckets. Checked before the
-    // primary bucket for the same reason as the gateway.
-    let ip_key = format!(
-        "ip:{}",
-        client_key(req.headers(), peer, limiters.config.trusted_proxy_hops)
-    );
-    if let Err(negative) = limiters.ip_ceiling.check_key(&ip_key) {
-        let wait = negative.wait_time_from(DefaultClock::default().now());
-        metrics::counter!(
-            "atlas_control_plane_rate_limited_total",
-            "scope" => "ip_ceiling",
-        )
-        .increment(1);
-        return too_many_requests(wait);
-    }
-
-    // Signup has no credential to key on by definition, so it is keyed by
-    // address. Everything else prefers the API key: control-plane callers
-    // are CLIs and CI runners that frequently share an egress address, and
-    // keying those by IP would throttle a whole office together.
-    let key = if signup {
-        client_key(req.headers(), peer, limiters.config.trusted_proxy_hops)
-    } else {
-        token_key(req.headers())
-            .unwrap_or_else(|| client_key(req.headers(), peer, limiters.config.trusted_proxy_hops))
-    };
-
-    let limiter = if signup {
-        &limiters.signup
-    } else {
-        &limiters.default
-    };
-
-    match limiter.check_key(&key) {
-        Ok(_) => next.run(req).await,
-        Err(negative) => {
-            let wait = negative.wait_time_from(DefaultClock::default().now());
+    match limiters.check(peer, req.headers(), &path) {
+        Ok(()) => next.run(req).await,
+        Err(wait) => {
+            // The scope label mirrors which bucket refused: the primary
+            // bucket names the abuser better, but the ceiling is what
+            // actually caps a token-rotation attack.
+            let signup = is_signup_path(&path);
             metrics::counter!(
                 "atlas_control_plane_rate_limited_total",
-                "scope" => if signup { "signup" } else { "default" },
+                "scope" => if signup { "signup" } else { "ip_ceiling" },
             )
             .increment(1);
             too_many_requests(wait)
@@ -352,8 +262,8 @@ mod tests {
         assert!(!is_exempt_path("/v1/accounts"));
     }
 
-    /// With no trusted proxies a forged header must be ignored: honouring it
-    /// would hand an attacker a fresh signup bucket per request.
+    /// With no trusted proxies a forged header must be ignored: honouring
+    /// it would hand an attacker a fresh signup bucket per request.
     #[test]
     fn forged_forwarded_for_is_ignored_when_no_proxy_is_trusted() {
         let h = headers(&[("x-forwarded-for", "1.2.3.4")]);
@@ -389,18 +299,13 @@ mod tests {
             signup_per_minute: 2,
             ..RateLimitConfig::default()
         });
-        let key = "ip:198.51.100.1".to_string();
-        assert!(limiters.signup.check_key(&key).is_ok());
-        assert!(limiters.signup.check_key(&key).is_ok());
+        let headers = HeaderMap::new();
+        assert!(limiters.check(None, &headers, "/v1/accounts").is_ok());
+        assert!(limiters.check(None, &headers, "/v1/accounts").is_ok());
         assert!(
-            limiters.signup.check_key(&key).is_err(),
+            limiters.check(None, &headers, "/v1/accounts").is_err(),
             "third signup from one address must be rejected"
         );
-        // A different address is unaffected.
-        assert!(limiters
-            .signup
-            .check_key(&"ip:198.51.100.2".to_string())
-            .is_ok());
     }
 
     #[test]
@@ -410,10 +315,10 @@ mod tests {
             default_per_minute: 100,
             ..RateLimitConfig::default()
         });
-        let key = "ip:198.51.100.3".to_string();
-        assert!(limiters.signup.check_key(&key).is_ok());
-        assert!(limiters.signup.check_key(&key).is_err());
-        assert!(limiters.default.check_key(&key).is_ok());
+        let headers = HeaderMap::new();
+        assert!(limiters.check(None, &headers, "/v1/accounts").is_ok());
+        assert!(limiters.check(None, &headers, "/v1/accounts").is_err());
+        assert!(limiters.check(None, &headers, "/v1/projects").is_ok());
     }
 
     #[test]

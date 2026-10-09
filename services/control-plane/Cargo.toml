@@ -10,6 +10,7 @@ name = "atlas-control-plane"
 path = "src/main.rs"
 
 [dependencies]
+atlas-edge = { workspace = true }
 atlas-keys = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

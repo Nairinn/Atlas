@@ -1,34 +1,6 @@
-//! Prometheus recorder and scrape endpoint.
-//!
-//! Same shape as the gateway and geo-engine: the exporter binds its own
-//! listener on `METRICS_ADDR` rather than sharing the API port, so
-//! `/metrics` is not reachable from wherever the CLI is.
+//! Recorder install and scrape endpoint now live in `atlas_edge::metrics`;
+//! this module remains only so `crate::metrics` call sites in main.rs read
+//! naturally and the service keeps an obvious place for control-plane-only
+//! metric helpers if any appear.
 
-use axum::{routing::get, Router};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use std::net::SocketAddr;
-use tracing::info;
-
-pub fn install_recorder() -> PrometheusHandle {
-    PrometheusBuilder::new()
-        .install_recorder()
-        .expect("failed to install prometheus recorder")
-}
-
-pub async fn serve(addr: SocketAddr, handle: PrometheusHandle) -> anyhow::Result<()> {
-    let app = Router::new().route(
-        "/metrics",
-        get(move || {
-            let h = handle.clone();
-            async move { h.render() }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "metrics exporter listening");
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            tracing::error!(error = %e, "metrics server crashed");
-        }
-    });
-    Ok(())
-}
+pub use atlas_edge::metrics::{install_recorder, serve};

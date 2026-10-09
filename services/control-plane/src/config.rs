@@ -4,6 +4,7 @@
 //! `DEFAULT_BASE_URL` is `http://localhost:8081/v1`, so the HTTP port
 //! here is 8081 and every route is mounted under `/v1`.
 
+use atlas_edge::env as edge_env;
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -39,8 +40,8 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         Self {
-            http_addr: parse_addr("HTTP_ADDR", "0.0.0.0:8081"),
-            metrics_addr: parse_addr("METRICS_ADDR", "0.0.0.0:9090"),
+            http_addr: edge_env::parse_addr("HTTP_ADDR", "0.0.0.0:8081"),
+            metrics_addr: edge_env::parse_addr("METRICS_ADDR", "0.0.0.0:9090"),
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://atlas:atlas_dev@localhost:5432/atlas".to_string()),
             database_pool_size: env::var("DATABASE_POOL_SIZE")
@@ -66,13 +67,16 @@ impl Config {
                     .unwrap_or(2_000),
             ),
             rate_limit: crate::ratelimit::RateLimitConfig {
-                default_per_minute: parse_u32("RATE_LIMIT_PER_MINUTE", 120),
-                signup_per_minute: parse_u32("RATE_LIMIT_SIGNUP_PER_MINUTE", 3),
+                default_per_minute: edge_env::parse_u32("RATE_LIMIT_PER_MINUTE", 120),
+                signup_per_minute: edge_env::parse_u32("RATE_LIMIT_SIGNUP_PER_MINUTE", 3),
                 // Per-address ceiling; see ratelimit.rs for why it exists.
-                ip_ceiling_per_minute: parse_u32("RATE_LIMIT_IP_CEILING_PER_MINUTE", 1200),
+                ip_ceiling_per_minute: edge_env::parse_u32(
+                    "RATE_LIMIT_IP_CEILING_PER_MINUTE",
+                    1200,
+                ),
                 // 0 = trust nothing in X-Forwarded-For. Behind the
                 // ingress-nginx in infra/k8s this is 1.
-                trusted_proxy_hops: parse_u32("TRUSTED_PROXY_HOPS", 0) as usize,
+                trusted_proxy_hops: edge_env::parse_u32("TRUSTED_PROXY_HOPS", 0) as usize,
                 enabled: env::var("RATE_LIMIT_ENABLED")
                     .map(|v| v != "false" && v != "0")
                     .unwrap_or(true),
@@ -83,26 +87,6 @@ impl Config {
     pub fn endpoint_for(&self, project_name: &str) -> String {
         self.endpoint_template.replace("{name}", project_name)
     }
-}
-
-/// Parse an integer env var, failing at startup on garbage rather than
-/// falling back: a typo'd value must stop the deploy, not quietly run
-/// with config the operator believes they set.
-fn parse_u32(var: &str, default: u32) -> u32 {
-    match env::var(var) {
-        Ok(v) => v
-            .trim()
-            .parse()
-            .unwrap_or_else(|_| panic!("{var} must be an integer, got {v:?}")),
-        Err(_) => default,
-    }
-}
-
-fn parse_addr(var: &str, default: &str) -> SocketAddr {
-    env::var(var)
-        .unwrap_or_else(|_| default.to_string())
-        .parse()
-        .unwrap_or_else(|_| panic!("{var} must be a valid socket address"))
 }
 
 #[cfg(test)]

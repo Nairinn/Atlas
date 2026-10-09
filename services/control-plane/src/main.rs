@@ -64,32 +64,10 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(atlas_edge::shutdown::shutdown_signal())
     .await
     .context("axum server")?;
 
     info!("atlas-control-plane exited cleanly");
     Ok(())
-}
-
-async fn shutdown_signal() {
-    use tokio::signal;
-    let ctrl_c = async {
-        signal::ctrl_c().await.ok();
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-    info!("shutdown signal received");
 }

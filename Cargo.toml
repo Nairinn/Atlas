@@ -6,6 +6,7 @@
 resolver = "2"
 members = [
     # Shared libraries
+    "crates/atlas-edge",
     "crates/atlas-keys",
     # Phase 0 — platform developer surface
     "cli",
@@ -28,6 +29,7 @@ members = [
 
 # Shared dependency versions. Member crates inherit via `workspace = true`.
 [workspace.dependencies]
+atlas-edge = { path = "crates/atlas-edge" }
 atlas-keys = { path = "crates/atlas-keys" }
 axum = "0.7"
 tonic = "0.13"

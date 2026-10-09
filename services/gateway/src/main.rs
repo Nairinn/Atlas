@@ -11,7 +11,7 @@
 //! why the channels are lazy.
 
 use anyhow::Context;
-use atlas_gateway::{config, metrics, ratelimit, routes, state};
+use atlas_gateway::{config, ratelimit, routes, state};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -34,8 +34,8 @@ async fn main() -> anyhow::Result<()> {
         "starting atlas-gateway"
     );
 
-    let metrics_handle = metrics::install_recorder();
-    metrics::serve(cfg.metrics_addr, metrics_handle).await?;
+    let metrics_handle = atlas_edge::metrics::install_recorder();
+    atlas_edge::metrics::serve(cfg.metrics_addr, metrics_handle).await?;
 
     let limiters = ratelimit::Limiters::new(cfg.rate_limit.clone());
     limiters.spawn_gc();
@@ -71,33 +71,10 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(atlas_edge::shutdown::shutdown_signal())
     .await
     .context("axum server")?;
 
     info!("atlas-gateway exited cleanly");
     Ok(())
-}
-
-/// Wait for SIGTERM (k8s rolling deploy) or SIGINT (local ctrl-c).
-async fn shutdown_signal() {
-    use tokio::signal;
-    let ctrl_c = async {
-        signal::ctrl_c().await.ok();
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-    info!("shutdown signal received");
 }

@@ -113,6 +113,7 @@ name = "atlas-control-plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atlas-edge",
  "atlas-keys",
  "axum 0.7.9",
  "chrono",
@@ -136,10 +137,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-edge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "governor",
+ "http",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "atlas-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atlas-edge",
  "atlas-keys",
  "axum 0.7.9",
  "chrono",

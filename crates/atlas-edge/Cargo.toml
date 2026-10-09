@@ -1,0 +1,18 @@
+[package]
+name = "atlas-edge"
+version = "0.1.0"
+edition = "2021"
+description = "Shared edge-service plumbing for the Atlas gateway and control plane: metrics exporter, shutdown, env parsing, bearer parsing, and the rate-limit core."
+license = "MIT"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+governor = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+http = "1"

@@ -1,64 +1,51 @@
-//! Request rate limiting.
+//! Request rate limiting: the gateway's vocabulary over the shared
+//! atlas-edge limiter core.
 //!
-//! # What this does and does not protect
-//!
-//! This is **per-replica**, in-process limiting. With three gateway pods a
-//! configured 60/min is effectively 180/min globally, because a client's
-//! requests are spread across replicas by the load balancer. That is
-//! deliberate rather than overlooked: a globally exact limit needs shared
-//! state (Redis) on the hot path of every request, which is a latency and
-//! an availability cost this does not yet justify.
-//!
-//! Treat it as the layer that stops one client from exhausting one replica,
-//! sitting underneath the ingress rate limit which is the real global cap.
-//! Both are worth having — the ingress limit disappears the moment anything
-//! reaches the service by another route, which is exactly the situation
-//! in-process limiting covers.
+//! The GCRA machinery, key derivation, and the per-address anti-rotation
+//! ceiling live in `atlas_edge::ratelimit`; this module owns what is
+//! gateway-specific: which paths get the strict credential quota, how a
+//! request is classified, and what the 429 body looks like. The
+//! per-replica caveat (three pods behind a balancer is three times the
+//! configured rate) is documented in the shared crate.
 //!
 //! # Keying
 //!
-//! Authenticated requests are keyed by a digest of the bearer token, not by
-//! IP. Behind carrier-grade NAT or a corporate egress, thousands of
-//! legitimate users share one address, and an IP-keyed limit would throttle
-//! all of them together while doing nothing about a single attacker
-//! rotating addresses.
-//!
-//! Unauthenticated requests have nothing else to key on, so they use the
-//! client address — see [`client_key`] for why that address is not simply
-//! taken from `X-Forwarded-For`.
+//! Authenticated requests are keyed by a digest of the bearer token, not
+//! by IP. Behind carrier-grade NAT or a corporate egress, thousands of
+//! legitimate users share one address, and an IP-keyed limit would
+//! throttle all of them together while doing nothing about a single
+//! attacker rotating addresses. Unauthenticated requests have nothing
+//! else to key on, so they use the client address.
 
-use std::net::{IpAddr, SocketAddr};
-use std::num::NonZeroU32;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use atlas_edge::ratelimit as core;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use governor::clock::{Clock, DefaultClock};
-use governor::state::keyed::DefaultKeyedStateStore;
-use governor::{Quota, RateLimiter};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
-type Keyed = RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>;
+/// The gateway's one strict-quota profile: credential endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictProfile {
+    Credential,
+}
 
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
-    /// Requests per minute for ordinary authenticated traffic.
     pub default_per_minute: u32,
     /// Requests per minute for credential endpoints (login, register).
     /// Much lower: these are the ones worth brute forcing.
     pub auth_per_minute: u32,
-    /// Per-address requests per minute, applied to EVERY non-exempt request
-    /// in addition to the primary bucket. This is the anti-rotation cap:
-    /// without it a client minting a fresh bearer string per request gets
-    /// a fresh token bucket each time. Set high enough that carrier-grade
-    /// NAT users never hit it in normal traffic.
+    /// Per-address requests per minute, applied to EVERY non-exempt
+    /// request in addition to the primary bucket. This is the
+    /// anti-rotation cap.
     pub ip_ceiling_per_minute: u32,
-    /// How many proxies sit in front of this service. See [`client_key`].
+    /// How many proxies sit in front of this service.
     pub trusted_proxy_hops: usize,
     pub enabled: bool,
 }
@@ -83,55 +70,63 @@ impl Default for RateLimitConfig {
     }
 }
 
+impl RateLimitConfig {
+    fn into_core(self) -> core::Quotas<StrictProfile> {
+        core::Quotas {
+            default_per_minute: self.default_per_minute,
+            ip_ceiling_per_minute: self.ip_ceiling_per_minute,
+            trusted_proxy_hops: self.trusted_proxy_hops,
+            enabled: self.enabled,
+            strict: vec![(StrictProfile::Credential, self.auth_per_minute)],
+        }
+    }
+}
+
 pub struct Limiters {
-    default: Keyed,
-    auth: Keyed,
-    /// A per-address cap that applies even to authenticated traffic, so a
-    /// client rotating garbage bearer tokens cannot mint a fresh bucket per
-    /// request from one address. Set far above the per-token quota so
-    /// carrier-grade NAT users never feel it; only the rotation attack does.
-    ip_ceiling: Keyed,
-    config: RateLimitConfig,
+    inner: Arc<core::Limiters<StrictProfile>>,
 }
 
 impl Limiters {
     pub fn new(config: RateLimitConfig) -> Arc<Self> {
-        let quota = |per_minute: u32| {
-            let n = NonZeroU32::new(per_minute.max(1)).expect("nonzero");
-            // Burst equal to the per-minute rate: GCRA refills continuously,
-            // so this allows a short spike then settles to the steady rate,
-            // which matches how a real client opening a screen behaves.
-            Quota::per_minute(n).allow_burst(n)
-        };
         Arc::new(Self {
-            default: RateLimiter::keyed(quota(config.default_per_minute)),
-            auth: RateLimiter::keyed(quota(config.auth_per_minute)),
-            ip_ceiling: RateLimiter::keyed(quota(config.ip_ceiling_per_minute)),
-            config,
+            inner: core::Limiters::new(config.into_core()),
         })
     }
 
-    /// Drop buckets for keys that have not been seen recently.
-    ///
-    /// Without this the key map grows for every distinct IP or token
-    /// forever, which turns the rate limiter itself into a memory
-    /// exhaustion vector — the opposite of its job.
-    pub fn retain_recent(&self) {
-        self.default.retain_recent();
-        self.auth.retain_recent();
-        self.ip_ceiling.retain_recent();
+    pub fn spawn_gc(self: &Arc<Self>) {
+        self.inner.spawn_gc();
     }
 
-    /// Spawn the periodic sweep. Cheap: it walks only live keys.
-    pub fn spawn_gc(self: &Arc<Self>) {
-        let limiters = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                tick.tick().await;
-                limiters.retain_recent();
-            }
-        });
+    fn check(
+        &self,
+        peer: Option<SocketAddr>,
+        headers: &HeaderMap,
+        path: &str,
+    ) -> Result<(), Duration> {
+        if !self.inner.quotas().enabled {
+            return Ok(());
+        }
+        let credential = is_credential_path(path);
+        let ip_key = client_key(headers, peer, self.inner.quotas().trusted_proxy_hops);
+        self.inner.check_ip_ceiling(&ip_key)?;
+
+        // Credential endpoints are keyed by address even when a token is
+        // present: the point is to limit guessing at *other people's*
+        // credentials, and an attacker with any valid token could
+        // otherwise exempt themselves from the strict quota.
+        let key = if credential {
+            ip_key
+        } else {
+            token_key(headers).unwrap_or_else(|| {
+                client_key(headers, peer, self.inner.quotas().trusted_proxy_hops)
+            })
+        };
+        let profile = if credential {
+            Some(&StrictProfile::Credential)
+        } else {
+            None
+        };
+        self.inner.check_primary(profile, &key)
     }
 }
 
@@ -166,68 +161,23 @@ fn is_credential_path(path: &str) -> bool {
         || path.starts_with("/v1/auth/email/verify")
 }
 
-/// Build the limiter key for a request.
-///
-/// # Why the client address is not just `X-Forwarded-For[0]`
-///
-/// `X-Forwarded-For` is client-supplied. Anyone can send
-/// `X-Forwarded-For: 1.2.3.4` and, if the first entry is trusted, get a
-/// fresh rate-limit bucket per forged value — which defeats the limiter
-/// entirely and is a worse position than not having one, because it looks
-/// protected.
-///
-/// The only safe read is to count back from the right by the number of
-/// proxies you actually run: each appends the address it saw, so the
-/// (hops+1)-th from the end is the last address a trusted proxy observed.
-/// `trusted_proxy_hops = 0` means no proxy is trusted and the socket peer
-/// address is used, which is correct for direct exposure and for tests.
-pub fn client_key(
-    headers: &HeaderMap,
-    peer: Option<SocketAddr>,
-    trusted_proxy_hops: usize,
-) -> String {
-    if trusted_proxy_hops > 0 {
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            let hops: Vec<&str> = xff
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect();
-            // hops.len() - trusted_proxy_hops is the index of the address the
-            // outermost trusted proxy saw. A shorter list than expected means
-            // the request did not traverse the proxies we think it did, so
-            // fall through to the peer address rather than trusting it.
-            if let Some(idx) = hops.len().checked_sub(trusted_proxy_hops) {
-                if let Some(addr) = hops.get(idx) {
-                    if let Ok(ip) = addr.parse::<IpAddr>() {
-                        return format!("ip:{ip}");
-                    }
-                }
-            }
-        }
-    }
-    match peer {
-        Some(addr) => format!("ip:{}", addr.ip()),
-        // Only reachable when ConnectInfo is absent, which in practice means
-        // a test harness driving the router directly.
-        None => "ip:unknown".to_string(),
-    }
+/// Address key: X-Forwarded-For read from the right by trusted hops.
+pub fn client_key(headers: &HeaderMap, peer: Option<SocketAddr>, hops: usize) -> String {
+    core::client_key(
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+        peer,
+        hops,
+    )
 }
 
-/// Key authenticated requests by a digest of the token.
-///
-/// Hashed rather than used raw so a bearer token is not sitting in a map
-/// key in memory, and truncated because 16 hex characters is ample to keep
-/// buckets distinct.
+/// Token key: digest of the VALIDATED bearer (gateway shape).
 fn token_key(headers: &HeaderMap) -> Option<String> {
     let header = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
         .ok()?;
     let token = crate::validate::bearer_token(header).ok()?;
-    let digest = Sha256::digest(token.as_bytes());
-    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    Some(format!("tok:{hex}"))
+    core::token_key(Some(token))
 }
 
 pub async fn layer(
@@ -239,8 +189,8 @@ pub async fn layer(
     check(&limiters, Some(peer), req, next).await
 }
 
-/// Same as [`layer`] but without `ConnectInfo`, for the test harness and for
-/// any deployment where the listener does not provide a peer address.
+/// Same as [`layer`] but without `ConnectInfo`, for the test harness and
+/// for any deployment where the listener does not provide a peer address.
 pub async fn layer_without_peer(
     State(limiters): State<Arc<Limiters>>,
     req: Request,
@@ -255,58 +205,20 @@ async fn check(
     req: Request,
     next: Next,
 ) -> Response {
-    if !limiters.config.enabled {
-        return next.run(req).await;
-    }
-
     let path = req.uri().path().to_string();
     if is_exempt_path(&path) {
         return next.run(req).await;
     }
-    let credential = is_credential_path(&path);
-
-    // The per-address ceiling applies to every non-exempt request. It is
-    // checked second: the primary bucket names the abuser better (scope
-    // label), but the ceiling is what actually caps a token-rotation
-    // attack, which otherwise mints a fresh primary bucket per request.
-    let ip_key = format!(
-        "ip:{}",
-        client_key(req.headers(), peer, limiters.config.trusted_proxy_hops)
-    );
-    if let Err(negative) = limiters.ip_ceiling.check_key(&ip_key) {
-        let wait = negative.wait_time_from(DefaultClock::default().now());
-        metrics::counter!(
-            "atlas_gateway_rate_limited_total",
-            "scope" => "ip_ceiling",
-        )
-        .increment(1);
-        return too_many_requests(wait);
-    }
-
-    // Credential endpoints are keyed by address even when a token is
-    // present: the point is to limit guessing at *other people's*
-    // credentials, and an attacker with any valid token could otherwise
-    // exempt themselves from the strict quota.
-    let key = if credential {
-        client_key(req.headers(), peer, limiters.config.trusted_proxy_hops)
-    } else {
-        token_key(req.headers())
-            .unwrap_or_else(|| client_key(req.headers(), peer, limiters.config.trusted_proxy_hops))
-    };
-
-    let limiter = if credential {
-        &limiters.auth
-    } else {
-        &limiters.default
-    };
-
-    match limiter.check_key(&key) {
-        Ok(_) => next.run(req).await,
-        Err(negative) => {
-            let wait = negative.wait_time_from(DefaultClock::default().now());
+    match limiters.check(peer, req.headers(), &path) {
+        Ok(()) => next.run(req).await,
+        Err(wait) => {
+            // The scope label mirrors which bucket refused: the primary
+            // bucket names the abuser better, but the ceiling is what
+            // actually caps a token-rotation attack.
+            let credential = is_credential_path(&path);
             metrics::counter!(
                 "atlas_gateway_rate_limited_total",
-                "scope" => if credential { "credential" } else { "default" },
+                "scope" => if credential { "credential" } else { "ip_ceiling" },
             )
             .increment(1);
             too_many_requests(wait)
@@ -390,8 +302,8 @@ mod tests {
         assert_eq!(client_key(&h, peer("10.0.0.7:5000"), 1), "ip:203.0.113.9");
     }
 
-    /// The attack this defends against: the client prepends junk hoping the
-    /// leftmost entry is used. Counting from the right ignores it.
+    /// The attack this defends against: the client prepends junk hoping
+    /// the leftmost entry is used. Counting from the right ignores it.
     #[test]
     fn spoofed_entries_prepended_by_the_client_are_skipped() {
         let h = headers(&[("x-forwarded-for", "9.9.9.9, 8.8.8.8, 203.0.113.9")]);
@@ -401,8 +313,8 @@ mod tests {
         assert_eq!(client_key(&h, peer("10.0.0.7:5000"), 2), "ip:8.8.8.8");
     }
 
-    /// Fewer hops than configured means the request did not come through the
-    /// proxies we expect, so nothing in the header is trustworthy.
+    /// Fewer hops than configured means the request did not come through
+    /// the proxies we expect, so nothing in the header is trustworthy.
     #[test]
     fn a_short_header_falls_back_to_the_peer_address() {
         let h = headers(&[("x-forwarded-for", "203.0.113.9")]);
@@ -445,22 +357,17 @@ mod tests {
             auth_per_minute: 3,
             ..RateLimitConfig::default()
         });
-        let key = "ip:198.51.100.1".to_string();
+        let headers = HeaderMap::new();
         for i in 0..3 {
             assert!(
-                limiters.auth.check_key(&key).is_ok(),
+                limiters.check(None, &headers, "/v1/auth/login").is_ok(),
                 "request {i} should pass"
             );
         }
         assert!(
-            limiters.auth.check_key(&key).is_err(),
+            limiters.check(None, &headers, "/v1/auth/login").is_err(),
             "the fourth request must be rejected"
         );
-        // A different client is unaffected.
-        assert!(limiters
-            .auth
-            .check_key(&"ip:198.51.100.2".to_string())
-            .is_ok());
     }
 
     #[test]
@@ -471,15 +378,15 @@ mod tests {
             ip_ceiling_per_minute: 6000,
             ..RateLimitConfig::default()
         });
-        let key = "ip:198.51.100.3".to_string();
-        assert!(limiters.auth.check_key(&key).is_ok());
+        let headers = HeaderMap::new();
+        assert!(limiters.check(None, &headers, "/v1/auth/login").is_ok());
         assert!(
-            limiters.auth.check_key(&key).is_err(),
+            limiters.check(None, &headers, "/v1/auth/login").is_err(),
             "credential quota spent"
         );
         // Exhausting credential attempts must not lock the client out of
         // ordinary reads.
-        assert!(limiters.default.check_key(&key).is_ok());
+        assert!(limiters.check(None, &headers, "/v1/geo/nearby").is_ok());
     }
 
     #[test]
@@ -490,19 +397,20 @@ mod tests {
     }
 
     #[test]
-    fn disabled_config_is_representable() {
+    fn disabled_config_passes_everything_through() {
         let limiters = Limiters::new(RateLimitConfig {
             enabled: false,
             ..RateLimitConfig::default()
         });
-        assert!(!limiters.config.enabled);
+        assert!(limiters
+            .check(None, &HeaderMap::new(), "/v1/auth/login")
+            .is_ok());
     }
 
     #[test]
     fn gc_does_not_panic_on_an_empty_limiter() {
         let limiters = Limiters::new(RateLimitConfig::default());
-        limiters.retain_recent();
-        let _ = DefaultClock::default().now();
+        limiters.inner.retain_recent();
     }
 
     /// The rotation attack the ceiling exists for: a fresh bearer string
@@ -516,22 +424,17 @@ mod tests {
             ip_ceiling_per_minute: 5,
             ..RateLimitConfig::default()
         });
-        let ip_key = "ip:203.0.113.9".to_string();
         // Five rotating bearers: each gets a distinct token bucket, so
         // the default limiter never complains — but the ceiling does.
         for i in 0..5 {
             let headers = headers(&[("authorization", &format!("Bearer garbage-token-{i}"))]);
-            let token = token_key(&headers).unwrap();
-            assert!(limiters.default.check_key(&token).is_ok());
-            assert!(limiters.ip_ceiling.check_key(&ip_key).is_ok());
+            assert!(limiters.check(None, &headers, "/v1/geo/nearby").is_ok());
         }
         // The sixth, with yet another fresh token, is refused by the
         // ceiling even though its token bucket is brand new.
         let headers = headers(&[("authorization", "Bearer garbage-token-6")]);
-        let token = token_key(&headers).unwrap();
-        assert!(limiters.default.check_key(&token).is_ok());
         assert!(
-            limiters.ip_ceiling.check_key(&ip_key).is_err(),
+            limiters.check(None, &headers, "/v1/geo/nearby").is_err(),
             "the ceiling, not the token bucket, must stop rotation"
         );
     }

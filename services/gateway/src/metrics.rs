@@ -1,45 +1,11 @@
-//! Prometheus metrics: recorder install, scrape endpoint, and the
-//! per-request tracking middleware.
-//!
-//! Mirrors the geo-engine setup so both Rust services expose the same
-//! shape of data. The scrape endpoint binds its own listener on
-//! `METRICS_ADDR` rather than living on the public router — `/metrics`
-//! on a public edge would hand out request volumes and error rates to
-//! anyone who asked.
+//! The gateway's per-request tracking middleware. The recorder install
+//! and the scrape endpoint are shared with the control plane and live in
+//! `atlas_edge::metrics`.
 
 use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::{routing::get, Router};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use std::net::SocketAddr;
 use std::time::Instant;
-use tracing::info;
-
-pub fn install_recorder() -> PrometheusHandle {
-    PrometheusBuilder::new()
-        .install_recorder()
-        .expect("failed to install prometheus recorder")
-}
-
-/// Spawn the `/metrics` server. Returns once the listener is bound.
-pub async fn serve(addr: SocketAddr, handle: PrometheusHandle) -> anyhow::Result<()> {
-    let app = Router::new().route(
-        "/metrics",
-        get(move || {
-            let h = handle.clone();
-            async move { h.render() }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "metrics exporter listening");
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            tracing::error!(error = %e, "metrics server crashed");
-        }
-    });
-    Ok(())
-}
 
 /// Record request count and latency, labelled by route template.
 ///
