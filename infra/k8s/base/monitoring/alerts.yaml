@@ -18,16 +18,13 @@
 # `for:` is never zero. Every one of these can spike briefly during a
 # deploy or a leader election, and a rule that fires on a single scrape
 # trains people to ignore the channel — which is worse than not alerting.
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
+apiVersion: monitoring.googleapis.com/v1
+kind: Rules
 metadata:
   name: atlas-alerts
   namespace: atlas
   labels:
     app.kubernetes.io/part-of: atlas
-    # The Prometheus Operator selects rules by label; without a matching
-    # ruleSelector on the Prometheus resource this object is inert.
-    prometheus: main
 spec:
   groups:
     # --- money ------------------------------------------------------------

@@ -1,0 +1,33 @@
+# Alertmanager routing for GMP, placeholder only.
+#
+# # Why this is a placeholder
+#
+# The receiver URL comes from a Secret (`atlas-alertmanager`) that this
+# repo does not create — the same arrangement as atlas-secrets in
+# secrets.example.yaml. Until a real endpoint exists, alert RULES are
+# still evaluated by GMP; only the notification hop is missing, which is
+# strictly better than rules that exist but are never routed anywhere.
+#
+# Create the secret by hand for a scratch cluster:
+#
+#   kubectl -n atlas create secret generic atlas-alertmanager \
+#     --from-literal=webhook-url='https://REPLACE_ME/hook'
+#
+# # Why GMP's Alertmanager CR and not the Prometheus Operator's
+#
+# D3: the monitoring stack is Google Managed Prometheus. Its alerting
+# path is exactly this CRD. The Prometheus Operator's Alertmanager would
+# need its whole stack deployed to do the same job.
+---
+apiVersion: monitoring.googleapis.com/v1
+kind: Alertmanager
+metadata:
+  name: atlas-alertmanager
+  namespace: atlas
+  labels:
+    app.kubernetes.io/part-of: atlas
+spec:
+  alertmanagers:
+    # The real endpoint lives in the atlas-alertmanager Secret; this
+    # value is a placeholder and is replaced at deploy time.
+    - url: https://REPLACE_ME

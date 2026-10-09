@@ -89,7 +89,7 @@ spec:
             # accurate.
             - name: DATABASE_URL
               valueFrom:
-                secretKeyRef: { name: atlas-secrets, key: database-url }
+                secretKeyRef: { name: atlas-secrets, key: gateway-db-url }
             # How long a resolved key stays cached, and therefore how long
             # `atlas keys revoke` takes to bite.
             - name: PROJECT_CACHE_TTL_SECONDS

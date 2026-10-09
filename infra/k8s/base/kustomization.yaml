@@ -19,12 +19,18 @@ resources:
   - autoscaling.yaml
   - network-policy.yaml
   - ingress.yaml
-  # PrometheusRule is a CRD from the Prometheus Operator. Applying it to a
-  # cluster without that operator installed fails with "no matches for
-  # kind"; the alerts are still worth keeping in the repo, because a rule
-  # file that lives in a monitoring team's separate config drifts from the
-  # metric names it references within a release or two.
+  # Strimzi KafkaTopic CRDs. replicas defaults to 1 (dev); the prod overlay
+  # raises it to 3 with min.insync.replicas=2.
+  - kafka-topics.yaml
+  # The monitoring objects are CRDs from Google Managed Prometheus
+  # (Rules, PodMonitoring, Alertmanager), enabled by the Terraform. On a
+  # cluster without GMP, applying fails with "no matches for kind"; the
+  # alerts are still worth keeping in the repo, because a rule file that
+  # lives in a monitoring team's separate config drifts from the metric
+  # names it references within a release or two.
   - monitoring/alerts.yaml
+  - monitoring/pod-monitoring.yaml
+  - monitoring/alertmanager.yaml
 
 # `labels` rather than the deprecated `commonLabels`. includeSelectors is
 # false on purpose: adding a label to every Deployment's selector would
@@ -34,25 +40,13 @@ labels:
       app.kubernetes.io/part-of: atlas
     includeSelectors: false
 
-images:
-  - name: ghcr.io/nairinn/atlas-migrator
-    newTag: latest
-  - name: ghcr.io/nairinn/atlas-auth-service
-    newTag: latest
-  - name: ghcr.io/nairinn/atlas-geo-engine
-    newTag: latest
-  - name: ghcr.io/nairinn/atlas-payments-service
-    newTag: latest
-  - name: ghcr.io/nairinn/atlas-gateway
-    newTag: latest
-  - name: ghcr.io/nairinn/atlas-control-plane
-    newTag: latest
-  - name: ghcr.io/nairinn/atlas-location-consumer
-    newTag: latest
-  - name: ghcr.io/nairinn/atlas-safety-consumer
-    newTag: latest
-  - name: ghcr.io/nairinn/atlas-fare-consumer
-    newTag: latest
+
+# NOTE — image tags are NOT pinned here.
+#
+# The manifests' inline tags say `latest`, which is fine for a dev cluster
+# and wrong for production: `latest` is a moving pointer, so a pod restart
+# can silently change which build is running. The prod overlay documents
+# the deploy step that pins `sha-<commit>` tags before apply.
 
 # NOTE — the migration Job needs a delete before re-apply.
 #

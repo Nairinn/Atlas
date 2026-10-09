@@ -8,8 +8,42 @@ resources:
 
 # The base is already sized for production, so this overlay adds placement
 # and durability constraints rather than changing counts.
+#
+# NOTE — pin image tags as part of the deploy, never `latest`.
+#
+# The Images workflow pushes `sha-<full-commit>` tags for every build on
+# main. The deploy step (CI or operator) pins them before apply:
+#
+#   cd infra/k8s/overlays/prod
+#   for svc in gateway control-plane auth-service geo-engine \
+#             payments-service location-consumer safety-consumer \
+#             fare-consumer migrator; do
+#     kustomize edit set image \
+#       ghcr.io/nairinn/atlas-$svc=ghcr.io/nairinn/atlas-$svc:sha-$GIT_SHA
+#   done
+#   kubectl -n atlas delete job atlas-migrate --ignore-not-found
+#   kubectl apply -k .
+#   kubectl -n atlas wait --for=condition=complete job/atlas-migrate --timeout=5m
+#
+# The `latest` tag is deliberately NOT overridden in this file: a tag
+# committed to the repo would go stale the moment main moved, and a stale
+# pin is worse than none because it looks like a pin.
 
+# Kafka topics in prod: 3 replicas and a write quorum. min.insync.replicas=2
+# means a produce acks=all fails rather than persists single-copy when one
+# broker is down — the money events on atlas.fare.events deserve that.
 patches:
+  - target:
+      kind: KafkaTopic
+      labelSelector: strimzi.io/cluster=atlas-kafka
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: add
+        path: /spec/config/min.insync.replicas
+        value: 2
+
   # Spread every replica across zones. Without this the scheduler is free
   # to put all three gateway pods in one zone, and a zonal outage takes the
   # whole front door with it.

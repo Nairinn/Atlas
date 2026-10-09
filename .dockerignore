@@ -1,0 +1,39 @@
+# Keeps build contexts small and prevents local state from leaking into
+# images. Every Dockerfile in this repo uses the repo root as its context,
+# so without this file each `docker build` ships target/, build caches,
+# .git, and the SDK node_modules to the daemon.
+
+# Rust
+target/
+**/target/
+
+# Gradle / Kotlin
+.gradle/
+build/
+**/build/
+.kotlin/
+
+# VCS and editor state
+.git/
+.gitignore
+.idea/
+.vscode/
+*.iml
+
+# Node (TS SDK) and Dart
+node_modules/
+.dart_tool/
+
+# Docs, SDKs, infra, and scripts never enter an image
+sdks/
+docs/
+infra/
+scripts/__pycache__/
+*.md
+LICENSE
+
+# Local state
+.env
+.env.*
+atlas.toml
+docker-compose.yml

@@ -31,7 +31,7 @@ jobs:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
 
       # protoc is a hard build dependency: every Rust service runs
       # tonic-build in build.rs, and without it `cargo check` fails before
@@ -45,7 +45,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup component add rustfmt clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.7.5
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -62,15 +62,15 @@ jobs:
     name: Kotlin (auth, payments)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.4.0
         with:
           distribution: temurin
           # Matches the jvmTarget set in the root build.gradle.kts.
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.3.0
 
       # No system protoc here on purpose: protobuf-gradle-plugin resolves
       # the protoc binary from Maven (see gradle/libs.versions.toml), so
@@ -80,7 +80,7 @@ jobs:
 
       - name: Upload test reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kotlin-test-reports
           path: services/*/build/reports/tests/
@@ -106,7 +106,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
 
       - name: Install protobuf compiler, cmake, and psql
         run: |
@@ -116,7 +116,7 @@ jobs:
 
       # Before the first cargo invocation: the migration steps below build
       # the migrator, and an uncached build here would be paid twice.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.7.5
 
       # Applied with the same binary production uses, not a psql loop, so
       # this exercises the migrator itself alongside the SQL.
@@ -162,12 +162,12 @@ jobs:
           cargo test -p atlas-migrator -- --include-ignored
           cargo test -p atlas-gateway -- --include-ignored
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.4.0
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.3.0
 
       # fare-consumer's Exposed adapters skip themselves without this env
       # var. They cover the custom jsonb column type and the ON CONFLICT
@@ -190,7 +190,7 @@ jobs:
     name: docker-compose syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
       # Catches YAML errors and bad interpolation in the file every
       # contributor uses to run the stack locally. Does not build images.
       - name: Validate compose file
@@ -200,15 +200,24 @@ jobs:
     name: Kubernetes manifests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
 
+      # Pinned to the sha256 of the release tarballs. These binaries run
+      # against every manifest in the repo; a hijacked release or a
+      # tampered mirror would otherwise execute with the runner's
+      # credentials.
       - name: Install kustomize and kubeconform
         run: |
+          set -euo pipefail
+          KUSTOMIZE_SHA=3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7
+          KUBECONFORM_SHA=95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
           curl -sSLo kustomize.tar.gz \
             https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+          echo "$KUSTOMIZE_SHA  kustomize.tar.gz" | shasum -a 256 --check
           tar xzf kustomize.tar.gz && sudo mv kustomize /usr/local/bin/
           curl -sSLo kubeconform.tar.gz \
             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          echo "$KUBECONFORM_SHA  kubeconform.tar.gz" | shasum -a 256 --check
           tar xzf kubeconform.tar.gz && sudo mv kubeconform /usr/local/bin/
 
       # Building proves the overlays and patches resolve. Validating proves
@@ -271,14 +280,57 @@ jobs:
             fi
           done
 
+  openapi-contract:
+    # The SDKs are tested against hand-rolled local servers, which prove
+    # the SDKs correct but not that the SPEC describes the real surface.
+    # Prism mocks docs/openapi.yaml, so a request that the router serves
+    # but the spec omits fails here (404 from Prism) and vice versa.
+    name: OpenAPI contract (Prism)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+
+      - name: Start Prism mock
+        run: |
+          npx -y prism mock docs/openapi.yaml --port 4010 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:4010/ -o /dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:4010/ -o /dev/null \
+            || { echo "prism did not start"; exit 1; }
+
+      # Prism answers documented routes with the spec's own 4xx examples.
+      # The contract that matters is shape: the route exists in the spec,
+      # and the error envelope carries the code vocabulary the SDKs parse.
+      - name: Error envelope matches the SDK vocabulary
+        run: |
+          set -euo pipefail
+          STATUS=$(curl -s -o /tmp/body.json -w '%{http_code}' \
+            "http://127.0.0.1:4010/v1/geo/nearby?lat=0&lng=0")
+          echo "status=$STATUS"
+          cat /tmp/body.json
+          python3 - <<'PY'
+          import json
+          body = json.load(open("/tmp/body.json"))
+          assert "error" in body, f"no error envelope in {body}"
+          err = body["error"]
+          assert "code" in err and "message" in err, f"envelope missing fields: {err}"
+          codes = {"invalid_argument", "unauthenticated", "permission_denied",
+                   "not_found", "resource_exhausted", "deadline_exceeded",
+                   "failed_precondition", "unavailable", "internal", "unimplemented"}
+          assert err["code"] in codes, f"code {err['code']!r} not in the SDK vocabulary"
+          print("contract OK: envelope shape and code vocabulary")
+          PY
+
   dependencies:
     name: Dependency advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.7.5
 
       # Fails only on advisories against crates this build actually
       # compiles. `cargo audit` alone reads Cargo.lock, which lists
@@ -290,14 +342,21 @@ jobs:
         run: ./scripts/check-dependencies.sh
 
   dart-sdk:
-    name: Dart SDK
+    name: Dart SDK (${{ matrix.sdk }})
     runs-on: ubuntu-latest
+    strategy:
+      # A floor failure is information, not a reason to skip the stable run.
+      fail-fast: false
+      matrix:
+        # The package claims `sdk: ^3.0.0`; testing only on stable would
+        # let a 3.2-only syntax break every 3.0.x consumer unnoticed.
+        sdk: [stable, "3.0.0"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
 
-      - uses: dart-lang/setup-dart@v1
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd782cdfcb92d6eb # v1
         with:
-          sdk: stable
+          sdk: ${{ matrix.sdk }}
 
       - name: Install dependencies
         working-directory: sdks/dart
@@ -322,9 +381,9 @@ jobs:
     name: Terraform
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: 1.9.8
 
@@ -347,9 +406,9 @@ jobs:
       run:
         working-directory: sdks/typescript
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           # Built and tested on the OLDEST version the package claims to
           # support, not the newest. The floor is 20.3 because the

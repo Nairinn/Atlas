@@ -51,7 +51,10 @@ services:
   migrator:
     build:
       context: .
-      dockerfile: tools/migrator/Dockerfile
+      dockerfile: docker/rust.Dockerfile
+      args:
+        PACKAGE: atlas-migrator
+        BIN: atlas-migrate
     depends_on:
       postgres: { condition: service_healthy }
     environment:
@@ -92,7 +95,11 @@ services:
       # used `./services/auth-service` as context which would not have worked
       # once the protobuf-gradle-plugin started reading from $rootDir/proto.
       context: .
-      dockerfile: services/auth-service/Dockerfile
+      dockerfile: docker/jvm.Dockerfile
+      args:
+        DIR: services/auth-service
+        TASK: services:auth-service
+        JAR: auth-service
     ports:
       - "50051:50051"
       - "8051:8051"   # /metrics + /healthz; never publish this in prod
@@ -122,7 +129,11 @@ services:
     # must therefore be the repo root.
     build:
       context: .
-      dockerfile: services/geo-engine/Dockerfile
+      dockerfile: docker/rust.Dockerfile
+      args:
+        PACKAGE: atlas-geo-engine
+        BIN: atlas-geo-engine
+        EXTRA_APT: cmake
     ports:
       - "50052:50052"
       - "9091:9090"  # host 9091 -> container 9090 to avoid a clash later
@@ -145,7 +156,11 @@ services:
     # from $rootDir/proto). gRPC on 50053; HTTP (/metrics + webhooks) on 8053.
     build:
       context: .
-      dockerfile: services/payments-service/Dockerfile
+      dockerfile: docker/jvm.Dockerfile
+      args:
+        DIR: services/payments-service
+        TASK: services:payments-service
+        JAR: payments-service
     ports:
       - "50053:50053"
       - "8053:8053"
@@ -181,7 +196,10 @@ services:
   gateway:
     build:
       context: .
-      dockerfile: services/gateway/Dockerfile
+      dockerfile: docker/rust.Dockerfile
+      args:
+        PACKAGE: atlas-gateway
+        BIN: atlas-gateway
     ports:
       - "8080:8080"
       # host 9093 -> container 9090. 9090 is free but 9091 is geo-engine's
@@ -219,7 +237,11 @@ services:
   location-consumer:
     build:
       context: .
-      dockerfile: consumers/location-consumer/Dockerfile
+      dockerfile: docker/rust.Dockerfile
+      args:
+        PACKAGE: atlas-location-consumer
+        BIN: atlas-location-consumer
+        EXTRA_APT: cmake
     ports:
       - "9094:9090"
     depends_on:
@@ -240,7 +262,11 @@ services:
   safety-consumer:
     build:
       context: .
-      dockerfile: consumers/safety-consumer/Dockerfile
+      dockerfile: docker/rust.Dockerfile
+      args:
+        PACKAGE: atlas-safety-consumer
+        BIN: atlas-safety-consumer
+        EXTRA_APT: cmake
     ports:
       - "9095:9090"
     depends_on:
@@ -261,7 +287,11 @@ services:
   fare-consumer:
     build:
       context: .
-      dockerfile: consumers/fare-consumer/Dockerfile
+      dockerfile: docker/jvm.Dockerfile
+      args:
+        DIR: consumers/fare-consumer
+        TASK: consumers:fare-consumer
+        JAR: fare-consumer
     ports:
       - "8054:8054"
     depends_on:
@@ -290,7 +320,10 @@ services:
   control-plane:
     build:
       context: .
-      dockerfile: services/control-plane/Dockerfile
+      dockerfile: docker/rust.Dockerfile
+      args:
+        PACKAGE: atlas-control-plane
+        BIN: atlas-control-plane
     ports:
       - "8081:8081"
       - "9096:9090"  # host 9096 -> container 9090; 9090-9095 are taken

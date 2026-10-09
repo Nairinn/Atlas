@@ -55,7 +55,12 @@ spec:
         - { protocol: TCP, port: 50052 }
         - { protocol: TCP, port: 50053 }
 ---
-# Metrics scraping, from the monitoring namespace only.
+# Metrics scraping.
+#
+# D3: the scraper is Google Managed Prometheus. Its collectors run in the
+# `gmp-system` namespace (Google-managed, label-stable), so that is the
+# only namespace allowed in on metrics ports. The old `monitoring`
+# namespace allowance is kept for a self-managed Prometheus in dev.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -66,6 +71,9 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gmp-system
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: monitoring
@@ -97,3 +105,179 @@ spec:
       ports:
         - { protocol: TCP, port: 8080 }
         - { protocol: TCP, port: 8081 }
+---
+# Default deny egress. Every allowance below is additive; without this,
+# a compromised pod can reach anything, including metadata.google.internal
+# and the other tenants' databases.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: atlas
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+---
+# DNS. Nothing works without it, so it comes first.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: atlas
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        # kube-dns listens on 53 in kube-system; the UDP/TCP pair covers
+        # both resolver modes.
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Cloud SQL over the VPC peering: private-service-access range only,
+# which is the Terraform output `private_service_range_cidr`
+# (google_compute_global_address.private_service_range in network.tf).
+# The placeholder below is a /16 that matches the Terraform default; the
+# deploy step substitutes the real output, because a hardcoded CIDR in
+# this file would go stale the moment the range moves.
+# Port 5432 only — the migrations and every service's pool speak Postgres.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cloudsql
+  namespace: atlas
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            # REPLACE_AT_DEPLOY: terraform output private_service_range_cidr
+            cidr: 10.0.0.0/16
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# Kafka (Strimzi) runs in this namespace; consumers, geo-engine, auth and
+# fare-consumer produce to it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka
+  namespace: atlas
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 9092 }
+---
+# Intra-namespace gRPC: the gateway and control-plane dial the backends,
+# and the consumers dial each other and the services.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace-grpc
+  namespace: atlas
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 50051 }
+        - { protocol: TCP, port: 50052 }
+        - { protocol: TCP, port: 50053 }
+        - { protocol: TCP, port: 8051 }
+        - { protocol: TCP, port: 8053 }
+---
+# fare-consumer -> payments-service only (settle/refund), not the other
+# backends. This is the client-side complement of backends-from-gateway.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fare-consumer-to-payments
+  namespace: atlas
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: fare-consumer
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: payments-service
+      ports:
+        - { protocol: TCP, port: 50053 }
+---
+# control-plane probes gRPC health of the backends for `atlas status` —
+# health endpoints only, and only inside the namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: control-plane-health-probes
+  namespace: atlas
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: control-plane
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [auth-service, geo-engine, payments-service, gateway]
+      ports:
+        - { protocol: TCP, port: 50051 }
+        - { protocol: TCP, port: 50052 }
+        - { protocol: TCP, port: 50053 }
+        - { protocol: TCP, port: 9090 }
+---
+# payments-service -> Stripe (api.stripe.com) for the Connect money path,
+# and auth-service -> SMTP (email verification) — the only two workloads
+# with a reason to leave the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: payments-stripe-egress
+  namespace: atlas
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: payments-service
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            # Metadata endpoints must never be reachable from a pod.
+            except: [169.254.169.254/32, 10.0.0.0/8]
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: auth-smtp-egress
+  namespace: atlas
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: auth-service
+  policyTypes: [Egress]
+  egress:
+    # SMTP host from the SMTP_HOST env var; 587 (STARTTLS) or 465 (implicit).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [169.254.169.254/32, 10.0.0.0/8]
+      ports:
+        - { protocol: TCP, port: 587 }
+        - { protocol: TCP, port: 465 }

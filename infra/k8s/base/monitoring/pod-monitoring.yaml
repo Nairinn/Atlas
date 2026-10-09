@@ -1,0 +1,101 @@
+# Google Managed Prometheus scrape configuration.
+#
+# D3: the monitoring stack is GMP, which the Terraform already enables
+# (gke.tf managed_prometheus). These PodMonitoring CRDs are how GMP finds
+# the metrics endpoints — they replace the prometheus.io/* pod
+# annotations, which GMP ignores.
+#
+# One object per port shape rather than one per service: the selectors
+# pick the pods, the port name picks the endpoint, and adding a ninth
+# workload means adding a label match, not a new object. The Rust
+# containers name their metrics port `metrics`; the JVM ones serve
+# metrics on their only HTTP port, named `http`.
+#
+# # Why the namespace is `atlas` and not `gmp-system`
+#
+# PodMonitoring is namespace-scoped and must live where the target pods
+# live. The `gmp-system` namespace holds Google's collector operands,
+# which these objects configure but do not deploy.
+---
+# The Rust services and consumers all serve /metrics on 9090.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: atlas-rust-metrics
+  namespace: atlas
+  labels:
+    app.kubernetes.io/part-of: atlas
+spec:
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          [gateway, control-plane, geo-engine,
+           location-consumer, safety-consumer]
+  targetPort:
+    name: metrics
+  endpoints:
+    - interval: 30s
+      path: /metrics
+---
+# auth-service serves metrics on 8051 (Ktor), on its `http` port.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: atlas-auth-metrics
+  namespace: atlas
+  labels:
+    app.kubernetes.io/part-of: atlas
+spec:
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [auth-service]
+  targetPort:
+    name: http
+  endpoints:
+    - interval: 30s
+      path: /metrics
+---
+# payments-service serves metrics on 8053 (Ktor), on its `http` port,
+# including the transactional-outbox gauges the money alerts read.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: atlas-payments-metrics
+  namespace: atlas
+  labels:
+    app.kubernetes.io/part-of: atlas
+spec:
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [payments-service]
+  targetPort:
+    name: http
+  endpoints:
+    - interval: 30s
+      path: /metrics
+---
+# fare-consumer (JVM) serves metrics on 8054, on its `http` port.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: atlas-fare-consumer-metrics
+  namespace: atlas
+  labels:
+    app.kubernetes.io/part-of: atlas
+spec:
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [fare-consumer]
+  targetPort:
+    name: http
+  endpoints:
+    - interval: 30s
+      path: /metrics

@@ -91,7 +91,7 @@ resource "google_sql_database" "atlas" {
 #   gcloud sql users set-password atlas \
 #     --instance=<instance> --password="$PW"
 #   printf 'postgres://atlas:%s@<private-ip>:5432/atlas' "$PW" | \
-#     gcloud secrets versions add atlas-database-url --data-file=-
+#     gcloud secrets versions add atlas-$ENV-database-url --data-file=-
 #
 # Terraform manages the user's existence; a human manages its secret.
 resource "google_sql_user" "atlas" {
@@ -101,6 +101,62 @@ resource "google_sql_user" "atlas" {
   lifecycle {
     # Terraform never learns the real password, so it must not try to
     # reconcile the empty value it has against the live one.
+    ignore_changes = [password]
+  }
+}
+
+# --- per-service database roles ----------------------------------------------
+#
+# One shared `atlas` user means every pod holds a credential that can do
+# everything every other pod can. Splitting by what each workload actually
+# needs:
+#
+#   atlas_migrator  DDL: owns the migration history, creates/alters objects.
+#   atlas_<service> DML per service: SELECT/INSERT/UPDATE/DELETE on its own
+#                   schemas only.
+#   atlas_gateway   SELECT on control.api_keys only: the gateway reads
+#                   keys, never writes them.
+#
+# Passwords are NOT set here (same rule as the atlas user above): a value
+# in Terraform is a value in state. Set out of band:
+#
+#   PW=$(openssl rand -base64 32)
+#   gcloud sql users set-password atlas_gateway \
+#     --instance=<instance> --password="$PW"
+#   printf 'postgres://atlas_gateway:%s@<private-ip>:5432/atlas' "$PW" | \
+#     gcloud secrets versions add atlas-<env>-gateway-db-url --data-file=-
+#
+# The GRANTs themselves live in migrations/0040_control_plane.sql's wake in
+# scripts/db-grants.sql, applied by the migrator's post-migrate hook, NOT
+# in Terraform: grants reference schema objects Terraform does not model,
+# so a `terraform apply` would fight the migrator over them.
+
+resource "google_sql_user" "migrator" {
+  name     = "atlas_migrator"
+  instance = google_sql_database_instance.atlas.name
+
+  lifecycle {
+    ignore_changes = [password]
+  }
+}
+
+resource "google_sql_user" "gateway" {
+  name     = "atlas_gateway"
+  instance = google_sql_database_instance.atlas.name
+
+  lifecycle {
+    ignore_changes = [password]
+  }
+}
+
+resource "google_sql_user" "service" {
+  # One SQL user per DML workload: auth, geo, payments, control.
+  for_each = toset(["auth", "geo", "payments", "control"])
+
+  name     = "atlas_${each.value}"
+  instance = google_sql_database_instance.atlas.name
+
+  lifecycle {
     ignore_changes = [password]
   }
 }

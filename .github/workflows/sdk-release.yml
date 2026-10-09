@@ -1,0 +1,112 @@
+name: SDK release
+
+# Publishing is tag-driven, one tag prefix per language:
+#
+#   ts-v1.2.3    -> npm  @atlas/sdk
+#   rust-v1.2.3  -> crates.io atlas-sdk
+#   dart-v1.2.3  -> pub.dev atlas
+#
+# A dry run precedes every real publish: it catches the failures that
+# only a registry can catch (2FA rejection, name squatting, tarball
+# contents, README rendering) without consuming a version number.
+# Registries treat a version as burnt the moment it is published, so a
+# failed publish of 1.2.3 means 1.2.4 forever.
+#
+# No credentials live in this file; each publish step references secrets
+# by name only (NPM_TOKEN, CARGO_REGISTRY_TOKEN, PUB_DEV_TOKEN / the
+# pub-dev OIDC setup).
+on:
+  push:
+    tags: ["ts-v*", "rust-v*", "dart-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    name: TypeScript (${{ github.ref_name }})
+    if: startsWith(github.ref_name, 'ts-v')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/typescript
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20.3"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+          registry-url: https://registry.npmjs.org
+
+      - name: Test
+        run: |
+          npm ci
+          npm test
+
+      - name: Dry-run publish
+        run: npm publish --dry-run
+
+      # Provenance requires the OIDC token; npm renders it as the
+      # "Provenance" block on the package page.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance
+
+  rust:
+    name: Rust (${{ github.ref_name }})
+    if: startsWith(github.ref_name, 'rust-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+
+      - name: Install protobuf compiler and cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler cmake
+
+      - name: Test
+        run: cargo test -p atlas-sdk
+
+      # --dry-run runs the same validation publish does (version
+      # availability, crate contents) without uploading.
+      - name: Dry-run publish
+        run: cargo publish -p atlas-sdk --dry-run
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish
+        run: cargo publish -p atlas-sdk
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  dart:
+    name: Dart (${{ github.ref_name }})
+    if: startsWith(github.ref_name, 'dart-v')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/dart
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd782cdfcb92d6eb # v1
+        with:
+          sdk: stable
+
+      - name: Test
+        run: |
+          dart pub get
+          dart analyze --fatal-infos
+          dart format --output=none --set-exit-if-changed .
+          dart test
+
+      # dart pub publish is interactive (asks for final confirmation).
+      # --dry-run skips the upload; the real publish force-confirms.
+      - name: Dry-run publish
+        run: dart pub publish --dry-run
+
+      - name: Publish
+        run: dart pub publish --force

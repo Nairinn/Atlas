@@ -1,0 +1,46 @@
+# Dependabot keeps the supply chain pinned moving, not just present.
+# Version bumps arrive as PRs, so the pinned-SHA actions in ci.yml and
+# release.yml update the same way the code does: visibly, through CI.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for all action bumps: they are reviewed together anyway,
+      # and nine separate "bump checkout" PRs is noise.
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      gradle:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /sdks/typescript
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+
+  - package-ecosystem: pub
+    directory: /sdks/dart
+    schedule:
+      interval: weekly
+    groups:
+      pub:
+        patterns: ["*"]

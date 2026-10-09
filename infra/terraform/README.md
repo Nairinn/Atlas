@@ -70,17 +70,26 @@ $(terraform output -raw get_credentials_command)
 **2. Set the database password and record the DSN**
 
 Terraform created the `atlas` user but not its password, on purpose.
+Secret ids are environment-suffixed, so set `ENV` first:
 
 ```bash
+ENV=prod   # dev | staging | prod — must match var.environment
+
 PW=$(openssl rand -base64 32)
 gcloud sql users set-password atlas \
   --instance="$(terraform output -raw database_instance_name)" --password="$PW"
 
 printf 'postgres://atlas:%s@%s:5432/atlas' \
   "$PW" "$(terraform output -raw database_private_ip)" \
-  | gcloud secrets versions add atlas-database-url --data-file=-
+  | gcloud secrets versions add "atlas-$ENV-database-url" --data-file=-
 
-openssl rand -base64 48 | gcloud secrets versions add atlas-jwt-secret --data-file=-
+openssl rand -base64 48 | gcloud secrets versions add "atlas-$ENV-jwt-secret" --data-file=-
+
+# Repeat for the per-role users (see the list in cloudsql.tf):
+# atlas_migrator, atlas_gateway, atlas_auth, atlas_geo, atlas_payments,
+# atlas_control — each DSN goes to its environment-suffixed container:
+# atlas-$ENV-migrator-db-url, atlas-$ENV-gateway-db-url,
+# atlas-$ENV-{auth,geo,payments,control}-db-url.
 ```
 
 **3. Install the add-ons**

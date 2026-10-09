@@ -47,7 +47,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: atlas-secrets
-                  key: database-url
+                  key: migrator-db-url
             - name: RUST_LOG
               valueFrom:
                 configMapKeyRef:
