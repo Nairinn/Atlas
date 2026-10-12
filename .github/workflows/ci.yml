@@ -31,7 +31,7 @@ jobs:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
 
       # protoc is a hard build dependency: every Rust service runs
       # tonic-build in build.rs, and without it `cargo check` fails before
@@ -62,15 +62,15 @@ jobs:
     name: Kotlin (auth, payments)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
 
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.4.0
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v4.4.0
         with:
           distribution: temurin
           # Matches the jvmTarget set in the root build.gradle.kts.
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.3.0
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v4.3.0
 
       # No system protoc here on purpose: protobuf-gradle-plugin resolves
       # the protoc binary from Maven (see gradle/libs.versions.toml), so
@@ -80,7 +80,7 @@ jobs:
 
       - name: Upload test reports
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kotlin-test-reports
           path: services/*/build/reports/tests/
@@ -106,7 +106,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
 
       - name: Install protobuf compiler, cmake, and psql
         run: |
@@ -162,12 +162,12 @@ jobs:
           cargo test -p atlas-migrator -- --include-ignored
           cargo test -p atlas-gateway -- --include-ignored
 
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.4.0
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v4.4.0
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.3.0
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v4.3.0
 
       # fare-consumer's Exposed adapters skip themselves without this env
       # var. They cover the custom jsonb column type and the ON CONFLICT
@@ -190,7 +190,7 @@ jobs:
     name: docker-compose syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
       # Catches YAML errors and bad interpolation in the file every
       # contributor uses to run the stack locally. Does not build images.
       - name: Validate compose file
@@ -200,7 +200,7 @@ jobs:
     name: Kubernetes manifests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
 
       # Pinned to the sha256 of the release tarballs. These binaries run
       # against every manifest in the repo; a hijacked release or a
@@ -286,7 +286,7 @@ jobs:
     name: OpenAPI contract (Prism)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
 
       - name: Start Prism mock
         run: |
@@ -325,7 +325,7 @@ jobs:
     name: Dependency advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.7.5
@@ -350,7 +350,7 @@ jobs:
         # let a 3.2-only syntax break every 3.0.x consumer unnoticed.
         sdk: [stable, "3.0.0"]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
 
       - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd782cdfcb92d6eb # v1
         with:
@@ -379,9 +379,9 @@ jobs:
     name: Terraform
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: 1.9.8
 
@@ -404,9 +404,9 @@ jobs:
       run:
         working-directory: sdks/typescript
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Built and tested on the OLDEST version the package claims to
           # support, not the newest. The floor is 20.3 because the

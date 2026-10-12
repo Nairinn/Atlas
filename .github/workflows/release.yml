@@ -107,15 +107,15 @@ jobs:
             task: consumers:fare-consumer
             jar: fare-consumer
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.0
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.10.2
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v3.10.2
 
       # Skipped on pull requests: a fork PR has no package-write token, and
       # nothing is being pushed anyway.
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.3.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v3.3.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -123,7 +123,7 @@ jobs:
 
       - name: Compute tags
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.6.1
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v5.6.1
         with:
           # GHCR paths must be lowercase and github.repository_owner keeps
           # the account's original casing ("Nairinn"). metadata-action
@@ -137,7 +137,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.9.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v6.9.0
         with:
           # Every Dockerfile in this repo COPYs from the repo root: the Rust
           # ones because Cargo workspace member paths are relative to it,
