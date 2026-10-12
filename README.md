@@ -182,7 +182,7 @@ Every `/v1` request carries two independent identities:
 | Header | Answers | Comes from | Lives |
 |---|---|---|---|
 | `X-Atlas-Key: atl_live_…` | which application is calling | `atlas keys create` | your server, in an env var |
-| `Authorization: Bearer *** | which of your users is calling | `POST /v1/auth/login` | per user, per session |
+| `Authorization: Bearer …` | which of your users is calling | `POST /v1/auth/login` | per user, per session |
 
 Neither substitutes for the other. Both are required even on register and login, because creating a user means creating them in a project.
 
@@ -216,7 +216,7 @@ These are the parts of a payments integration that are the same whichever proces
 
 **Webhook signatures.** `HmacWebhookVerifier` implements the scheme Stripe, GitHub, Shopify and Adyen's HMAC mode all share: HMAC-SHA256 over the raw body with a timestamp. Three properties, each of which has been a real CVE somewhere. It signs the **raw** body (re-serialised JSON has different bytes). It compares in **constant time** (`==` leaks how much of a guessed signature was right). It enforces a **timestamp window** in both directions, with the timestamp inside the signed material so it cannot be moved forward to escape the window. The endpoint also caps the body: it is unauthenticated by nature, because the signature covers the body and so must be read first.
 
-**Retries.** Every provider call is bounded by a timeout; an unbounded one parks a request thread and drains the connection pool behind it. But only `authorize` (which carries the idempotency key) and `lookup` (which changes nothing) are retried. `capture` and `refund` are attempted once: they identify a charge but carry no idempotency key of their own, and "usually idempotent" is not a property to bet customer money on. The recovery path for an ambiguous capture is the reconciliation sweep, not a repeat of the write.
+**Retries.** Every provider call is bounded by a timeout; an unbounded one parks a request thread and drains the connection pool behind it. But only `authorize` (which carries the idempotency key) and `lookup` (which changes nothing) are retried. `capture`, `cancel`, and `refund` are attempted once: they identify a charge but carry no idempotency key of their own, and "usually idempotent" is not a property to bet customer money on. The recovery path for an ambiguous capture is the reconciliation sweep, not a repeat of the write.
 
 ### Payments: Stripe Connect, and never holding the money
 
@@ -228,7 +228,7 @@ Drivers onboard through the platform: `POST /v1/payments/connected-accounts` min
 
 Everything around the processor call was already real and stays real: idempotency, the pending-then-capture ordering that keeps a crash recoverable, the transactional outbox, the ledger updates, and webhook signature verification. `FakePaymentProvider` remains the default for projects with no Stripe row. One deployment can serve a test tenant on the fake and a paying tenant on Stripe, per project, via `PerProjectPaymentProvider`.
 
-Deposits remain the only way money enters a wallet. The sweep for transactions left pending by a crash between capture and credit runs on a timer (see [Reconciliation](#reconciliation-webhooks-and-retries)). The per-project Stripe webhook endpoint (`POST /webhooks/stripe/{project_id}`, one signing secret per tenant) acts on verified events rather than only logging them: `payment_intent.succeeded` and `payment_intent.amount_capturable_updated` settle the matching transaction, `charge.refunded` reverses it, `account.updated` updates payout readiness. Unknown event types are acknowledged and logged rather than answered with a 5xx, since retrying an event Atlas cannot act on would only retry it forever.
+Deposits remain the only way money enters a wallet. The sweep for transactions left pending by a crash between capture and credit runs on a timer (see [Reconciliation](#reconciliation-webhooks-and-retries)). The per-project Stripe webhook endpoint (`POST /webhooks/stripe/{project_id}`, one signing secret per tenant) acts on verified events rather than only logging them: `payment_intent.succeeded` settles the matching transaction; `payment_intent.amount_capturable_updated` is recorded and ignored, since an authorized payment is not a captured one and the client still has to confirm; `charge.refunded` reverses only a full refund (a partial refund is recorded without reversing anything, because the internal ledger models whole fares); `account.updated` updates payout readiness. Unknown event types are acknowledged and logged rather than answered with a 5xx, since retrying an event Atlas cannot act on would only retry it forever.
 
 Stripe Connect keeps Atlas outside money transmission in the usual way, but jurisdictions differ and this is not legal advice; talk to a payments lawyer before live keys go in.
 
@@ -240,18 +240,17 @@ Synchronous calls go through the gateway; everything asynchronous goes through K
 
 | Topic | Produced by | Consumed by | What the consumer does |
 |---|---|---|---|
-| `atlas.location.updates` | geo-engine | location-consumer | Enforces the 24h retention window on `geo.locations` |
+| `atlas.location.updates` | geo-engine | location-consumer | Enforces the 24h retention window on `geo.locations`, prunes safety votes past their horizon, and drops memberships whose user has no live location |
 | | | safety-consumer | Diffs geofence membership and emits crossings |
 | `atlas.safety.alerts` | safety-consumer | *(developer's app)* | Geofence entry/exit, for the app to act on |
 | `atlas.fare.events` | payments (outbox) | fare-consumer | Settles on `RIDE_COMPLETED`; `RIDE_CANCELLED` cancels a still-pending hold (a refund only applies to already-settled money) |
 | `atlas.auth.tokens` | auth-service | auth-service | Cache invalidation fanout on revocation |
-| `atlas.elo.recompute` | — | — | Unused; safety scores are computed at read time |
 
 Every event carries a `project_id`. A consumer runs long after the request that produced the event, so there is no header and no token left to derive a tenant from; it has to travel with the event. A consumer that receives one without a usable project skips and commits rather than retrying, because a replay carries the same missing field and retrying would wedge the partition on one bad record.
 
 Settlement is event-driven, not an API call. `POST /v1/payments/transactions` creates a pending transaction and payments writes a `RIDE_ACCEPTED` event through its outbox. The money moves later, when the application publishes `RIDE_COMPLETED` or `RIDE_CANCELLED` and fare-consumer calls `SettleTransaction` / `RefundTransaction`. The refund path voids a still-pending hold rather than refunding it; only already-settled money is refunded. That is why the gateway exposes no settle endpoint.
 
-fare-consumer ignores payments' own events. Payments publishes `TRANSACTION_SETTLED` and `TRANSACTION_REFUNDED` onto the same topic fare-consumer reads. Those are acknowledgements for the audit log, not instructions; acting on them would settle in response to having settled, forever.
+fare-consumer ignores payments' own events. Payments publishes `TRANSACTION_SETTLED`, `TRANSACTION_REFUNDED`, and `TRANSACTION_CANCELLED` onto the same topic fare-consumer reads. Those are acknowledgements for the audit log, not instructions; acting on them would settle in response to having settled, forever.
 
 ## Password reset and email verification
 
@@ -264,7 +263,7 @@ Further properties:
 * Only the SHA-256 of a token is stored, the same rule API keys follow. The plaintext exists in one place: the email.
 * Tokens are single-use, enforced by a conditional `UPDATE ... WHERE used_at IS NULL` rather than a read-then-write, so two clicks on one link cannot both succeed.
 * Requesting a new link invalidates the old one, so clicking "resend" three times does not leave three live ways into an account in a mailbox.
-* A completed reset **revokes every session** and evicts them from the validation cache immediately. Without that eviction a token issued before the reset would keep working for the rest of the 30s cache TTL, the window the reset exists to close.
+* A completed reset **revokes every session** and evicts them from the validation cache on every replica, not just the one that handled the reset: the eviction fans out over the same Kafka topic the auth caches listen on. Without that fanout a token issued before the reset would keep working for the rest of the 30s cache TTL on some other pod, which is the window the reset exists to close.
 * A verification token cannot reset a password and vice versa. They are mailed under different pretexts, and "confirm your address" is far easier to get someone to click.
 * Verification does not revoke sessions: confirming an address is not evidence anything leaked.
 
@@ -320,7 +319,7 @@ Only step 3 invalidates anything, and by then every token signed with the old ke
 
 Two refusals are load-bearing here. A token naming a key this deployment does not hold is rejected on the `kid` alone rather than by trying every key, so "signed by something we retired" and "forged" stay distinguishable and the cost of verification does not grow with a value the caller controls. A malformed `JWT_RETIRED_KEYS` entry fails at startup rather than being skipped; dropping a retired key logs out every user holding a token signed with it, with nothing in the logs to say why.
 
-Tokens minted before this change carry no `kid` and verify against the active key, so deploying it logs nobody out.
+Tokens minted before the `kid` header existed also predate the `iss` and `aud` claims, and those claims are now required, so that oldest cohort is rejected and those users log in again. A token carrying `iss` and `aud` but no `kid` still verifies against the active key, so the rotation itself logs nobody out.
 
 ## Safety scores
 
@@ -334,7 +333,7 @@ It is not ELO, despite what the schema used to call it. ELO rates competitors fr
 
 Votes are per project. One customer's users voting a street unsafe does not change what another customer's users are told about it.
 
-`atlas.elo.recompute` remains unwired (scores are computed at read time rather than materialised) and stays in `events.proto` as the topic a future caching pass would use.
+`atlas.elo.recompute` is gone: the topic was deleted and `EloRecomputeEvent` stays in `events.proto` only as a reserved, fieldless shell. Scores are computed at read time rather than materialised; a caching pass would design its own event anyway.
 
 ## Dependency advisories
 
@@ -366,10 +365,14 @@ The gateway and control plane both limit requests in-process. Credential endpoin
 |---|---|---|
 | gateway | `/v1/auth/login`, `/v1/auth/register` | 10/min per client |
 | gateway | everything else | 600/min per token |
+| gateway | every non-exempt request, per client address | 6000/min ceiling |
 | control-plane | `POST /v1/accounts` | 3/min per client |
 | control-plane | everything else | 120/min per API key |
+| control-plane | every non-exempt request, per client address | 1200/min ceiling |
 
 Authenticated traffic is keyed by a digest of the bearer token rather than by IP: behind carrier-grade NAT or a corporate egress, thousands of real users share one address, and IP keying would throttle them together while doing nothing about one attacker rotating addresses. Health probes are never throttled; rate limiting a liveness probe turns a busy pod into a crash loop.
+
+The per-address ceilings exist because the limiter runs before authentication, so it cannot tell a real bearer from a rotated fake one. A client minting a fresh garbage bearer per request would otherwise get a fresh token bucket each time; the ceiling caps the address itself, which is far above the per-token quota so shared-egress users never feel it.
 
 **This is per-replica.** Three gateway pods at 600/min is 1800/min globally. A globally exact limit needs shared state on the hot path of every request; this is the layer that stops one client exhausting one replica, underneath the ingress limit which is the real global cap.
 
@@ -404,7 +407,7 @@ const { users } = await atlas.geo.nearby({ lat, lng, radiusM: 500 });
 const { balanceCents } = await atlas.payments.wallet();
 ```
 
-The TypeScript SDK inherits three rules from the API design. No method takes a user id or a project id; both come from credentials, mirroring the gateway's own rules. `projectKey` is required and cannot be overridden by a caller-supplied `headers` option, so a stray header cannot retarget another project. `payments.createTransaction` always sends an idempotency key, which is what makes it the only POST the transport will retry. Errors arrive as `AtlasError` carrying the stable `code` from the envelope. It has no runtime dependencies; it uses the platform `fetch`.
+The TypeScript SDK inherits three rules from the API design. No method takes a user id or a project id; both come from credentials, mirroring the gateway's own rules. `projectKey` is required and cannot be overridden by a caller-supplied `headers` option, so a stray header cannot retarget another project. `payments.createTransaction` and `payments.deposit` always send an idempotency key, which is what makes those the POSTs the transport will retry. Errors arrive as `AtlasError` carrying the stable `code` from the envelope. It has no runtime dependencies; it uses the platform `fetch`.
 
 See `sdks/typescript/README.md` for the retry policy and the full surface.
 
@@ -451,6 +454,7 @@ atlas/
 ├── cli/                # Rust developer CLI (produces the `atlas` binary)
 ├── proto/              # gRPC contracts and Kafka event schemas
 ├── migrations/         # Numbered SQL files, applied in order
+├── crates/             # Shared Rust code (atlas-edge, atlas-keys)
 ├── services/
 │   ├── gateway/        # Public REST edge (Rust/Axum)
 │   ├── control-plane/  # Projects, API keys, status (Rust/Axum)
@@ -463,16 +467,20 @@ atlas/
 │   └── fare-consumer/     # Settlement (Kotlin)
 ├── tools/
 │   └── migrator/       # Schema migration runner (Rust)
+├── libs/               # atlas-common (shared Kotlin)
+├── build-logic/        # Gradle convention plugin
 ├── sdks/
 │   ├── typescript/     # @atlas/sdk — TypeScript client
 │   ├── rust/           # Rust client
 │   └── dart/           # Dart client
+├── docker/             # The two shared Dockerfiles (rust, jvm)
+├── scripts/            # Parity checks and the restore drill
 ├── .github/workflows/  # CI
 ├── infra/
 │   ├── k8s/
-│   │   ├── base/       # Deployments, HPAs, PDBs, NetworkPolicies, Ingress
-│   │   ├── overlays/   # dev (1 replica) and prod (zone spread)
-│   │   └── kafka-topics.yaml  # Strimzi KafkaTopic CRDs
+│   │   ├── base/       # Deployments, HPAs, PDBs, NetworkPolicies, Ingress, monitoring, Kafka topics
+│   │   ├── components/ # Shared wait-for-schema init-container component
+│   │   └── overlays/   # dev (1 replica) and prod (zone spread)
 │   └── terraform/      # VPC, GKE, Cloud SQL, Secret Manager, IAM
 ├── atlas.toml.example  # Sample developer config
 └── docker-compose.yml  # Local dev environment
