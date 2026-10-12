@@ -2,29 +2,29 @@
 # from here so upgrades happen in one place.
 
 [versions]
-kotlin = "2.0.21"
-exposed = "0.55.0"
-hikari = "5.1.0"
-postgres = "42.7.4"
-jose4j = "0.9.6"
+kotlin = "2.4.21"
+exposed = "1.5.0"
+hikari = "7.1.0"
+postgres = "42.7.14"
+jose4j = "0.9.7"
 jbcrypt = "0.4"
-slf4j = "2.0.16"
-logback = "1.5.12"
-logstash-encoder = "8.0"
-junit = "5.11.3"
+slf4j = "2.0.20"
+logback = "1.6.5"
+logstash-encoder = "9.0"
+junit = "6.1.3"
 # Phase 2B additions: gRPC server, protobuf, Kafka producer/consumer, in-process cache.
-grpc = "1.68.1"
-grpc-kotlin = "1.4.1"
-protobuf = "3.25.5"
-kafka = "3.8.1"
-caffeine = "3.1.8"
-kotlinx-coroutines = "1.9.0"
-protobuf-plugin = "0.9.4"
+grpc = "1.84.2"
+grpc-kotlin = "1.5.0"
+protobuf = "4.36.2"
+kafka = "4.3.1"
+caffeine = "3.3.0"
+kotlinx-coroutines = "1.11.0"
+protobuf-plugin = "0.10.0"
 shadow-plugin = "8.1.1"
 # Phase 4 additions: Ktor HTTP server (metrics + provider webhooks) and
 # Micrometer's Prometheus registry for the /metrics endpoint.
-ktor = "2.3.13"
-micrometer = "1.13.6"
+ktor = "3.6.0"
+micrometer = "1.17.1"
 # Stripe Connect adapter (the per-project processor; see
 # services/.../stripe/StripePaymentProvider.kt).
 stripe-java = "34.0.0"
