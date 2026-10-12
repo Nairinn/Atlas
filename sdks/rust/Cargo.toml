@@ -22,4 +22,4 @@ uuid = { version = "1", features = ["v4"] }
 # transport, so headers, retries, and JSON handling are exercised as they
 # actually run — the same choice the TypeScript SDK makes.
 tokio = { version = "1", features = ["full"] }
-axum = "0.7"
+axum = "0.8"
