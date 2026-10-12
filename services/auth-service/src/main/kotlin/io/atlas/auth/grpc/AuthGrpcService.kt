@@ -27,7 +27,7 @@ import io.atlas.auth.core.SessionRepository
 import io.atlas.auth.core.SignedToken
 import io.atlas.auth.crypto.JwtSigner
 import io.atlas.auth.kafka.AuthTokenEventPublisher
-import io.atlas.auth.kafka.sha256Hex
+import io.atlas.common.sha256Hex
 import io.grpc.Status
 import io.grpc.StatusException
 import org.slf4j.LoggerFactory

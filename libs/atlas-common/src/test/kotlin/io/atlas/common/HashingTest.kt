@@ -1,4 +1,4 @@
-package io.atlas.auth.kafka
+package io.atlas.common
 
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -8,7 +8,7 @@ class HashingTest {
 
     @Test
     fun `sha256Hex matches known vectors`() {
-        // RFC 6234 / NIST FIPS 180-4 test vector.
+        // RFC 6234 / NIST FIPS 180-4 test vectors.
         assertEquals(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             sha256Hex(""),
@@ -20,11 +20,7 @@ class HashingTest {
     }
 
     @Test
-    fun `sha256Hex is deterministic and avalanche-sensitive`() {
-        val a = sha256Hex("token-one")
-        val b = sha256Hex("token-one")
-        val c = sha256Hex("token-two")
-        assertEquals(a, b)
-        assertNotEquals(a, c)
+    fun `different inputs hash differently`() {
+        assertNotEquals(sha256Hex("a"), sha256Hex("b"))
     }
 }

@@ -7,12 +7,12 @@ import io.atlas.auth.core.LoggingEmailSender
 import io.atlas.auth.crypto.BcryptPasswordHasher
 import io.atlas.auth.crypto.Jose4jJwtSigner
 import io.atlas.auth.crypto.SigningKey
-import io.atlas.auth.db.DatabaseBootstrap
+import io.atlas.common.DatabaseBootstrap
 import io.atlas.auth.db.ExposedSessionRepository
 import io.atlas.auth.db.ExposedUserRepository
 import io.atlas.auth.db.ExposedVerificationTokenRepository
 import io.atlas.auth.grpc.AuthGrpcService
-import io.atlas.auth.grpc.HealthCheck
+import io.atlas.common.HealthCheck
 import io.atlas.auth.http.MicrometerAuthMetrics
 import io.atlas.auth.http.newPrometheusRegistry
 import io.atlas.auth.http.startHttpServer
@@ -46,6 +46,7 @@ fun main() {
         jdbcUrl = config.databaseUrl,
         username = config.databaseUser,
         password = config.databasePassword,
+        poolName = "atlas-auth-pool",
     )
 
     val users = ExposedUserRepository()

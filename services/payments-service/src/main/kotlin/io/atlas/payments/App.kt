@@ -11,7 +11,7 @@ import io.atlas.payments.core.SettlementApplier
 import io.atlas.payments.core.StaticPaymentConfigSource
 import io.atlas.payments.core.StripeWebhookHandler
 import io.atlas.payments.crypto.ConfigCipher
-import io.atlas.payments.db.DatabaseBootstrap
+import io.atlas.common.DatabaseBootstrap
 import io.atlas.payments.db.ExposedOutboxBackend
 import io.atlas.payments.db.ExposedOutboxStore
 import io.atlas.payments.db.ExposedPaymentConfigSource
@@ -19,7 +19,7 @@ import io.atlas.payments.db.ExposedPayoutAccountSource
 import io.atlas.payments.db.ExposedTransactionRepository
 import io.atlas.payments.db.ExposedTransactionRunner
 import io.atlas.payments.db.ExposedWalletRepository
-import io.atlas.payments.grpc.HealthCheck
+import io.atlas.common.HealthCheck
 import io.atlas.payments.grpc.PaymentsGrpcService
 import io.atlas.payments.http.MicrometerPaymentsMetrics
 import io.atlas.payments.http.newPrometheusRegistry
@@ -64,6 +64,7 @@ fun main() {
         jdbcUrl = config.databaseUrl,
         username = config.databaseUser,
         password = config.databasePassword,
+        poolName = "atlas-payments-pool",
     )
 
     val registry = newPrometheusRegistry()

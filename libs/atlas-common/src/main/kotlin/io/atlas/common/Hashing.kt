@@ -1,14 +1,14 @@
-package io.atlas.auth.kafka
+package io.atlas.common
 
 import java.security.MessageDigest
 
 /**
- * SHA-256 of a JWT, hex-encoded. The Kafka [AuthTokenEvent] carries this
- * value rather than the raw token so the topic does not become a leak
- * channel: anyone with read access to atlas.auth.tokens learns *which* token
- * changed state without being able to use the token.
+ * SHA-256 hex digest. Used for idempotency-key hashing and for putting a
+ * JWT on the wire as a digest rather than the raw token: anything logged
+ * or published learns *which* token changed state without being able to
+ * use it.
  */
-internal fun sha256Hex(input: String): String {
+fun sha256Hex(input: String): String {
     val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
     return buildString(digest.size * 2) {
         for (b in digest) {

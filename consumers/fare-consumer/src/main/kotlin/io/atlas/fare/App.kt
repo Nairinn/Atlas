@@ -2,7 +2,7 @@ package io.atlas.fare
 
 import io.atlas.fare.config.EnvConfig
 import io.atlas.fare.core.FareEventHandler
-import io.atlas.fare.db.DatabaseBootstrap
+import io.atlas.common.DatabaseBootstrap
 import io.atlas.fare.db.ExposedAuditLog
 import io.atlas.fare.db.ExposedTransactionLookup
 import io.atlas.fare.grpc.PaymentsGrpcCommands
@@ -33,6 +33,7 @@ fun main() {
         jdbcUrl = config.databaseUrl,
         username = config.databaseUser,
         password = config.databasePassword,
+        poolName = "atlas-fare-consumer-pool",
     )
 
     val registry = newPrometheusRegistry()

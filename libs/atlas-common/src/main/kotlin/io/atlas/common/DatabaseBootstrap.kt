@@ -1,13 +1,13 @@
-package io.atlas.auth.db
+package io.atlas.common
 
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import org.jetbrains.exposed.sql.Database
 
 /**
- * Hikari + Exposed bootstrap. Called once at startup by the Phase 2B entry
- * point (`App.kt`). Kept tiny on purpose: configuration knobs that we have
- * actually needed in the past are exposed; everything else relies on
+ * Hikari + Exposed bootstrap. Called once at startup by each service's
+ * entry point. Kept tiny on purpose: configuration knobs that have
+ * actually been needed are exposed; everything else relies on
  * Hikari/Exposed defaults.
  */
 object DatabaseBootstrap {
@@ -16,6 +16,7 @@ object DatabaseBootstrap {
         username: String,
         password: String,
         maximumPoolSize: Int = 10,
+        poolName: String,
     ): Database {
         val config = HikariConfig().apply {
             this.jdbcUrl = jdbcUrl
@@ -23,8 +24,9 @@ object DatabaseBootstrap {
             this.password = password
             this.maximumPoolSize = maximumPoolSize
             this.driverClassName = "org.postgresql.Driver"
-            this.isAutoCommit = false   // Exposed manages its own transactions
-            this.poolName = "atlas-auth-pool"
+            // Exposed manages its own transactions.
+            this.isAutoCommit = false
+            this.poolName = poolName
         }
         val dataSource = HikariDataSource(config)
         return Database.connect(dataSource)

@@ -1,26 +1,19 @@
 package io.atlas.payments.core
 
-import java.security.MessageDigest
-
-/** Lowercase hex SHA-256 of [input]. */
-fun sha256Hex(input: String): String {
-    val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
-    val sb = StringBuilder(digest.size * 2)
-    for (b in digest) {
-        sb.append(Character.forDigit((b.toInt() shr 4) and 0xF, 16))
-        sb.append(Character.forDigit(b.toInt() and 0xF, 16))
-    }
-    return sb.toString()
-}
+import io.atlas.common.sha256Hex
 
 /**
  * Hash of the business arguments behind an idempotency key. Stored on the
- * transaction row so a reused key with DIFFERENT args is rejected rather than
- * silently returning the wrong transaction (see 0031_payments_outbox.sql).
+ * transaction row so a reused key with DIFFERENT args is rejected rather
+ * than silently returning the wrong transaction (see
+ * 0031_payments_outbox.sql).
  *
  * v2 includes the application fee: two initiations with the same key but
  * different fees are different requests, and must conflict rather than
  * replay. The `v2:` prefix lets stored v1 hashes stay readable.
+ *
+ * The digest itself lives in libs/atlas-common (`sha256Hex`), shared with
+ * auth-service's token hashing.
  */
 fun idempotencyArgsHash(
     fromUserId: String,

@@ -1,15 +1,15 @@
-package io.atlas.auth.grpc
+package io.atlas.common
 
 import io.grpc.health.v1.HealthCheckResponse
 import io.grpc.protobuf.services.HealthStatusManager
 
 /**
- * Thin wrapper around grpc-services' [HealthStatusManager] so [App.kt] can
- * register the standard `grpc.health.v1.Health` service on the server and
- * flip status to NOT_SERVING during graceful shutdown.
+ * Thin wrapper around grpc-services' [HealthStatusManager] so a service
+ * entry point can register the standard `grpc.health.v1.Health` service
+ * on the server and flip status to NOT_SERVING during graceful shutdown.
  *
- * Kubernetes liveness/readiness probes use `grpc_health_probe` against this
- * service in later phases; doing the wiring now means no migration later.
+ * Kubernetes liveness/readiness probes run `grpc_health_probe` against
+ * this service.
  */
 class HealthCheck {
     private val manager = HealthStatusManager()

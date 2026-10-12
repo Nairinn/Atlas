@@ -196,7 +196,7 @@ class InMemoryTransactionRepository : TransactionRepository {
      */
     @Synchronized
     fun ageToLegacyHash(id: UUID, fromUserId: String, toUserId: String, amountCents: Long) {
-        val legacy = io.atlas.payments.core.sha256Hex("$fromUserId|$toUserId|$amountCents|")
+        val legacy = io.atlas.common.sha256Hex("$fromUserId|$toUserId|$amountCents|")
         byId.entries
             .filter { it.key.second == id }
             .forEach { (k, v) -> byId[k] = v.copy(idempotencyArgsHash = legacy) }

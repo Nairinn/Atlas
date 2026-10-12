@@ -1,83 +1,30 @@
-// Atlas fare-consumer.
-//
-// Phase 6 scope:
-//   - Consumes atlas.fare.events (protobuf FareEvent from proto/events.proto)
-//   - Drives settlement: RIDE_COMPLETED -> SettleTransaction,
-//     RIDE_CANCELLED -> RefundTransaction, both over gRPC to
-//     payments-service. Money is never moved by writing to the database
-//     directly.
-//   - Writes the payments.transaction_events audit log that migration 0030
-//     reserved for this consumer, deduplicated on event_key (0032).
-//   - /metrics via Micrometer on its own Ktor server.
-//
-// It needs the protobuf plugin for two things: the FareEvent message it
-// decodes, and the PaymentsService client stub it calls.
-
-import com.google.protobuf.gradle.id
+// Atlas fare-consumer: consumes atlas.fare.events, drives settlement
+// (RIDE_COMPLETED -> settle, RIDE_CANCELLED -> cancel/void) over gRPC to
+// payments-service, and writes the transaction_events audit log. Money
+// is never moved by writing to the database directly. Build wiring
+// (protobuf codegen for the FareEvent it decodes and the PaymentsService
+// stub it calls, grpc-kotlin, JVM 21, shadow jar) lives in the
+// atlas.kotlin-service convention plugin.
 
 plugins {
-    alias(libs.plugins.kotlin.jvm)
-    alias(libs.plugins.protobuf)
-    alias(libs.plugins.shadow)
+    id("atlas.kotlin-service")
     application
-}
-
-kotlin {
-    jvmToolchain(21)
 }
 
 application {
     mainClass.set("io.atlas.fare.AppKt")
 }
 
-sourceSets {
-    main {
-        java.srcDirs(
-            "build/generated/source/proto/main/java",
-            "build/generated/source/proto/main/grpc",
-            "build/generated/source/proto/main/grpckt",
-            "build/generated/source/proto/main/kotlin",
-        )
-        proto {
-            srcDir("$rootDir/proto")
-        }
-    }
-}
-
-protobuf {
-    protoc {
-        artifact = libs.protoc.get().toString()
-    }
-    plugins {
-        id("grpc") {
-            artifact = libs.grpc.codegen.java.get().toString()
-        }
-        id("grpckt") {
-            artifact = libs.grpc.codegen.kotlin.get().toString() + ":jdk8@jar"
-        }
-    }
-    generateProtoTasks {
-        all().forEach { task ->
-            task.plugins {
-                id("grpc") {}
-                id("grpckt") {}
-            }
-            task.builtins {
-                id("kotlin") {}
-            }
-        }
-    }
-}
-
 dependencies {
+    // Shared bootstrap library.
+    implementation(project(":libs:atlas-common"))
+
+    // Storage: Exposed over Postgres with a Hikari pool.
     implementation(libs.exposed.core)
     implementation(libs.exposed.jdbc)
     implementation(libs.exposed.java.time)
     implementation(libs.hikari)
     implementation(libs.postgres)
-    implementation(libs.slf4j.api)
-    implementation(libs.logback.classic)
-    implementation(libs.logstash.encoder)
 
     implementation(libs.grpc.stub)
     implementation(libs.grpc.protobuf)
@@ -87,9 +34,14 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kafka.clients)
 
+    // /metrics via Micrometer on its own Ktor server.
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)
     implementation(libs.micrometer.registry.prometheus)
+
+    implementation(libs.slf4j.api)
+    implementation(libs.logback.classic)
+    implementation(libs.logstash.encoder)
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.junit.jupiter)
@@ -98,7 +50,4 @@ dependencies {
 
 tasks.shadowJar {
     archiveBaseName.set("fare-consumer")
-    archiveClassifier.set("all")
-    archiveVersion.set("")
-    mergeServiceFiles()
 }

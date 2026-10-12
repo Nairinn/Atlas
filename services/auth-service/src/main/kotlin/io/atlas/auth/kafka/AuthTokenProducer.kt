@@ -112,7 +112,7 @@ class AuthTokenProducer(
     private fun publish(claims: TokenClaims, rawToken: String, type: AuthTokenEvent.EventType) {
         val event = AuthTokenEvent.newBuilder()
             .setUserId(claims.userId.toString())
-            .setTokenHash(sha256Hex(rawToken))
+            .setTokenHash(io.atlas.common.sha256Hex(rawToken))
             .setSessionId(claims.sessionId.toString())
             .setEventType(type)
             .setOccurredAt(clock.instant().epochSecond)
