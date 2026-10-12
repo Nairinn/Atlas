@@ -37,7 +37,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * Phase 4 entry point. Reads config from env, opens the Postgres pool, builds
+ * Entry point. Reads config from env, opens the Postgres pool, builds
  * the PaymentsService graph, starts a gRPC server on :50053 (with
  * grpc.health.v1.Health), a Ktor HTTP server on :8053 (/metrics + webhooks),
  * and the background outbox dispatcher, then waits for the JVM to terminate.

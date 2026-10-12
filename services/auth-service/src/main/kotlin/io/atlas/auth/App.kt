@@ -25,7 +25,7 @@ import java.time.Duration
 import java.util.concurrent.TimeUnit
 
 /**
- * Phase 2B entry point. Reads config from env, opens the Postgres pool,
+ * Entry point. Reads config from env, opens the Postgres pool,
  * constructs the AuthService dependency graph, starts a gRPC server on
  * :50051 with grpc.health.v1.Health registered, fires up the Kafka producer
  * and the cache-invalidation consumer, and waits for the JVM to terminate.

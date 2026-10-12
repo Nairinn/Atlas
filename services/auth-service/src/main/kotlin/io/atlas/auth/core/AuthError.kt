@@ -1,7 +1,7 @@
 package io.atlas.auth.core
 
 /**
- * Sealed hierarchy of auth-domain errors. The gRPC layer (Phase 2B) maps
+ * Sealed hierarchy of auth-domain errors. The gRPC layer maps
  * each subtype to the appropriate status code; this layer is transport-
  * agnostic.
  *

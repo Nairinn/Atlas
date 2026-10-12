@@ -699,7 +699,9 @@ paths:
       description: |
         Creates a **pending** transaction and emits `RIDE_ACCEPTED`. The
         money moves later, when the application publishes `RIDE_COMPLETED`
-        or `RIDE_CANCELLED` and fare-consumer settles or refunds.
+        or `RIDE_CANCELLED` and fare-consumer settles (a still-pending
+        hold is voided on cancellation; only already-settled money is
+        refunded).
 
         There is deliberately no settle or refund endpoint here: the
         gateway cannot verify that the caller owns a transaction.

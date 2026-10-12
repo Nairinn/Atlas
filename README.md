@@ -21,8 +21,8 @@ In active development. What exists:
 * **Multi-tenancy** across the whole data plane, with the boundary enforced in SQL where it can be (see [Tenant isolation](#tenant-isolation))
 * Password reset and email verification, JWT signing key rotation, Stripe Connect payments machinery (see [Payments](#payments-stripe-connect-and-never-holding-the-money)), a transactional outbox, and a reconciliation sweep
 * `proto/` contracts for every internal service plus Kafka event schemas, per-schema SQL migrations including PostGIS, and a migration runner with recorded history
-* A **restore drill**, an OpenAPI description, Prometheus alert rules, and a dependency scan, each with a CI check that fails when it drifts
-* Local development via `docker-compose`; production infra via Terraform (GKE, private Cloud SQL, Secret Manager, Workload Identity) and Kubernetes manifests validated in CI; container images for all nine workloads pushed to GHCR on every push
+* A **restore drill**, an OpenAPI description, Google Managed Prometheus alert rules, and a dependency scan, each with a CI check that fails when it drifts
+* Local development via `docker-compose`; production infra via Terraform (GKE, private Cloud SQL, Secret Manager, Workload Identity) and Kubernetes manifests validated in CI; container images for all nine workloads, pushed to GHCR only after CI passes the same commit and tagged with SLSA provenance and SBOM attestations; the prod overlay pins `sha-<commit>` tags at deploy time (see `infra/k8s/overlays/prod`)
 
 The money path has one unfinished piece: no project has connected a real Stripe account yet. The `PaymentProvider` seam, the Stripe Connect adapter, onboarding, and webhooks are built; what remains is a business decision, covered in [Payments](#payments-stripe-connect-and-never-holding-the-money).
 
@@ -243,13 +243,13 @@ Synchronous calls go through the gateway; everything asynchronous goes through K
 | `atlas.location.updates` | geo-engine | location-consumer | Enforces the 24h retention window on `geo.locations` |
 | | | safety-consumer | Diffs geofence membership and emits crossings |
 | `atlas.safety.alerts` | safety-consumer | *(developer's app)* | Geofence entry/exit, for the app to act on |
-| `atlas.fare.events` | payments (outbox) | fare-consumer | Settles on `RIDE_COMPLETED`, refunds on `RIDE_CANCELLED` |
+| `atlas.fare.events` | payments (outbox) | fare-consumer | Settles on `RIDE_COMPLETED`; `RIDE_CANCELLED` cancels a still-pending hold (a refund only applies to already-settled money) |
 | `atlas.auth.tokens` | auth-service | auth-service | Cache invalidation fanout on revocation |
 | `atlas.elo.recompute` | — | — | Unused; safety scores are computed at read time |
 
 Every event carries a `project_id`. A consumer runs long after the request that produced the event, so there is no header and no token left to derive a tenant from; it has to travel with the event. A consumer that receives one without a usable project skips and commits rather than retrying, because a replay carries the same missing field and retrying would wedge the partition on one bad record.
 
-Settlement is event-driven, not an API call. `POST /v1/payments/transactions` creates a pending transaction and payments writes a `RIDE_ACCEPTED` event through its outbox. The money moves later, when the application publishes `RIDE_COMPLETED` or `RIDE_CANCELLED` and fare-consumer calls `SettleTransaction` / `RefundTransaction`. That is why the gateway exposes no settle endpoint.
+Settlement is event-driven, not an API call. `POST /v1/payments/transactions` creates a pending transaction and payments writes a `RIDE_ACCEPTED` event through its outbox. The money moves later, when the application publishes `RIDE_COMPLETED` or `RIDE_CANCELLED` and fare-consumer calls `SettleTransaction` / `RefundTransaction`. The refund path voids a still-pending hold rather than refunding it; only already-settled money is refunded. That is why the gateway exposes no settle endpoint.
 
 fare-consumer ignores payments' own events. Payments publishes `TRANSACTION_SETTLED` and `TRANSACTION_REFUNDED` onto the same topic fare-consumer reads. Those are acknowledgements for the audit log, not instructions; acting on them would settle in response to having settled, forever.
 
@@ -348,7 +348,7 @@ Findings are cross-checked against `cargo tree`, which resolves features. Runs i
 
 ## Alerting
 
-`infra/k8s/base/monitoring/alerts.yaml` holds 12 Prometheus rules. Three of them carry most of the design:
+`infra/k8s/base/monitoring/alerts.yaml` holds 13 alert rules as a Google Managed Prometheus `Rules` object, with the scrape paths declared by `PodMonitoring` objects beside it. Three of the rules carry most of the design:
 
 * **`AtlasOutboxNotDraining`** watches the AGE of the oldest pending outbox row, not the count. A big backlog that is draining is a busy system; a small one that is not draining is a broken one, and only age tells them apart. It alerts on a gauge rather than on `outbox_dispatched_total`, because that counter simply *stops* when Kafka is unreachable, and a counter that stops looks like a system with nothing to do.
 * **`AtlasTenantMismatchSpike`** fires on tokens presented with the wrong project key. That is either a broken integration or somebody probing the boundary, and both deserve a human.

@@ -14,7 +14,7 @@ import org.slf4j.LoggerFactory
 import java.util.concurrent.CountDownLatch
 
 /**
- * Phase 6 entry point for the fare-consumer.
+ * Entry point for the fare-consumer.
  *
  * Wires the ports in `core` to their real adapters, starts the Kafka loop
  * and an HTTP server for /metrics and /healthz, then parks until a signal

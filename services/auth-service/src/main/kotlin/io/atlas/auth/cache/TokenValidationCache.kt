@@ -16,7 +16,7 @@ import java.time.Duration
  * realistic gateway QPS. The Kafka consumer in [io.atlas.auth.kafka]
  * proactively evicts entries when other instances revoke.
  *
- * Phase 2B per the handoff doc.
+
  */
 class TokenValidationCache(
     ttl: Duration = Duration.ofSeconds(30),

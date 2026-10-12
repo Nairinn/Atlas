@@ -7,7 +7,7 @@ import java.time.Duration
 import java.util.UUID
 
 /**
- * Transport-agnostic auth business logic. Phase 2B will wrap this in a gRPC
+ * Transport-agnostic auth business logic. The gRPC layer wraps this in a gRPC
  * service. Tests inject in-memory repositories so the whole flow runs
  * without a database.
  *
