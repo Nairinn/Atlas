@@ -273,8 +273,13 @@ jobs:
       # to authenticate against Postgres in a very confusing way.
       - name: Secret template must not be applied
         run: |
+          # The guard is for secrets.example.yaml, whose jwt-secret carries
+          # this exact marker. A plain REPLACE_ME grep would false-positive
+          # on the Alertmanager's intentional webhook placeholder
+          # (base/monitoring/alertmanager.yaml), which is a fill-me-in
+          # template the overlays are allowed to render.
           for overlay in dev prod; do
-            if grep -q "REPLACE_ME" "/tmp/$overlay.yaml"; then
+            if grep -q "REPLACE_ME_WITH_AT_LEAST_32_BYTES" "/tmp/$overlay.yaml"; then
               echo "secrets.example.yaml leaked into the $overlay build"
               exit 1
             fi
@@ -305,11 +310,14 @@ jobs:
       - name: Start Prism mock
         run: |
           prism mock docs/openapi.yaml --port 4010 &
+          # The spec defines no `/` route, so Prism answers 404 on it once
+          # it is up; curl without -f counts that as "listening" while a
+          # not-yet-started server still fails to connect.
           for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:4010/ -o /dev/null && break
+            curl -s -o /dev/null http://127.0.0.1:4010/ && break
             sleep 1
           done
-          curl -sf http://127.0.0.1:4010/ -o /dev/null \
+          curl -s -o /dev/null http://127.0.0.1:4010/ \
             || { echo "prism did not start"; exit 1; }
 
       # Prism answers documented routes with the spec's own 4xx examples.

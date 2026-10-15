@@ -578,11 +578,12 @@ async fn status_reports_only_enabled_services_and_real_health() {
         // No backends are running in this test, and health is a live
         // probe rather than a stored flag — so it must report false.
         assert_eq!(s["healthy"], false, "health should be probed, not assumed");
-        // The gateway is unreachable too, so usage degrades to zero
-        // instead of erroring the whole request.
-        assert_eq!(s["requests_24h"], 0);
-        assert_eq!(s["error_rate"], 0.0);
-        assert_eq!(s["p95_latency_ms"], 0);
+        // Usage is null, not zero: gateway metrics carry no project label
+        // yet, so any number reported here would be platform-wide traffic
+        // dressed up as this project's — a wrong number that looks exact.
+        assert!(s["requests_24h"].is_null(), "usage: {}", s["requests_24h"]);
+        assert!(s["error_rate"].is_null(), "usage: {}", s["error_rate"]);
+        assert!(s["p95_latency_ms"].is_null(), "usage: {}", s["p95_latency_ms"]);
     }
 }
 
