@@ -29,6 +29,7 @@ spec:
   groups:
     # --- money ------------------------------------------------------------
     - name: atlas.payments
+      interval: 30s
       rules:
         # The outbox is the only path from a committed transaction to the
         # rest of the system. If it stops draining, settlements and refunds
@@ -125,6 +126,7 @@ spec:
 
     # --- the front door ---------------------------------------------------
     - name: atlas.gateway
+      interval: 30s
       rules:
         # 5% of requests failing is well past "some clients are having a
         # bad time". The ratio is over total requests rather than a raw
@@ -182,6 +184,7 @@ spec:
 
     # --- identity ---------------------------------------------------------
     - name: atlas.auth
+      interval: 30s
       rules:
         - alert: AtlasAuthFailureRate
           expr: |
@@ -219,6 +222,7 @@ spec:
 
     # --- data plane -------------------------------------------------------
     - name: atlas.consumers
+      interval: 30s
       rules:
         # Consumer lag, measured as the age of the events being processed
         # rather than as a Kafka offset delta. It is the number that maps

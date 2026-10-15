@@ -167,11 +167,16 @@ jobs:
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
   # A single gate the branch protection rule can require, instead of nine.
+  # When CI failed, `gate` was skipped and so was `images`; `always()` alone
+  # would run this anyway, read `skipped`, and mark the whole Images run
+  # failed — a second red X that says nothing CI has not already said. The
+  # gate condition keeps this skipped in that case, and the run reads as
+  # skipped rather than failed.
   images-complete:
     name: All images built
     runs-on: ubuntu-latest
-    needs: images
-    if: always()
+    needs: [gate, images]
+    if: always() && needs.gate.result == 'success'
     steps:
       - name: Check matrix result
         run: |

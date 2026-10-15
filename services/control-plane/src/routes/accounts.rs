@@ -78,6 +78,13 @@ async fn create_account(
     // Account-scoped: project_id stays NULL so this key can create the
     // developer's first project.
     //
+    // Admin-scoped (migration 0110): the column defaults to 'data', which
+    // is right for CI keys minted through /v1/projects/{p}/keys, but the
+    // bootstrap key exists to create projects, deploy, and mint those CI
+    // keys — all control-plane mutations that require_admin gates. A
+    // data-scoped bootstrap key can create an account and then do nothing
+    // with it.
+    //
     // Minted in the `development` tier (`atl_dev_`). An account has no
     // environment of its own — only projects do — and issuing a
     // production-looking `atl_live_` key before any project exists would
@@ -85,8 +92,8 @@ async fn create_account(
     let generated = keys::generate("development");
     sqlx::query(
         r#"
-        INSERT INTO control.api_keys (account_id, project_id, name, key_prefix, key_hash)
-        VALUES ($1, NULL, $2, $3, $4)
+        INSERT INTO control.api_keys (account_id, project_id, name, key_prefix, key_hash, scope)
+        VALUES ($1, NULL, $2, $3, $4, 'admin')
         "#,
     )
     .bind(account_id)

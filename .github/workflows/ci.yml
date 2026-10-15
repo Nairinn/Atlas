@@ -228,14 +228,16 @@ jobs:
           for overlay in dev prod; do
             echo "--- $overlay"
             kustomize build "infra/k8s/overlays/$overlay" > "/tmp/$overlay.yaml"
-            # The second -schema-location covers CRDs: PrometheusRule is not
-            # a core Kubernetes kind, and without it kubeconform -strict
-            # rejects the alert rules as an unknown type. Keeping -strict
-            # matters more than the convenience of -ignore-missing-schemas,
-            # which would also silence typos in the core objects.
+            # The second -schema-location covers CRDs: KafkaTopic and the
+            # Google Managed Prometheus kinds are not core Kubernetes
+            # objects, and without it kubeconform -strict rejects them as
+            # unknown types. -skip is only for the GMP Alertmanager, which
+            # the catalog has no schema for; a literal -schema-location
+            # targeting one kind would be tried against every kind.
             kubeconform -strict -summary -kubernetes-version 1.29.0 \
               -schema-location default \
               -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -skip Alertmanager \
               "/tmp/$overlay.yaml"
           done
 
@@ -288,9 +290,21 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
 
+      # Stoplight archived Prism and pulled it from npm (`npx prism` now
+      # installs an unrelated package), so the CLI comes from the last
+      # release binary instead, sha-pinned like kustomize/kubeconform.
+      - name: Install Prism
+        run: |
+          set -euo pipefail
+          PRISM_SHA=edfabb50b279f530bfed6349ccbdbdb1752dbf2720b84c3812d0acdfdd161b21
+          curl -sSLo prism \
+            https://github.com/stoplightio/prism/releases/download/v5.15.11/prism-cli-linux
+          echo "$PRISM_SHA  prism" | shasum -a 256 --check
+          chmod +x prism && sudo mv prism /usr/local/bin/
+
       - name: Start Prism mock
         run: |
-          npx -y prism mock docs/openapi.yaml --port 4010 &
+          prism mock docs/openapi.yaml --port 4010 &
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:4010/ -o /dev/null && break
             sleep 1
@@ -352,7 +366,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.0
 
-      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd782cdfcb92d6eb # v1
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1
         with:
           sdk: ${{ matrix.sdk }}
 

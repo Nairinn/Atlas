@@ -33,10 +33,9 @@ spec:
         values:
           [gateway, control-plane, geo-engine,
            location-consumer, safety-consumer]
-  targetPort:
-    name: metrics
   endpoints:
-    - interval: 30s
+    - port: metrics
+      interval: 30s
       path: /metrics
 ---
 # auth-service serves metrics on 8051 (Ktor), on its `http` port.
@@ -53,10 +52,9 @@ spec:
       - key: app.kubernetes.io/name
         operator: In
         values: [auth-service]
-  targetPort:
-    name: http
   endpoints:
-    - interval: 30s
+    - port: http
+      interval: 30s
       path: /metrics
 ---
 # payments-service serves metrics on 8053 (Ktor), on its `http` port,
@@ -74,10 +72,9 @@ spec:
       - key: app.kubernetes.io/name
         operator: In
         values: [payments-service]
-  targetPort:
-    name: http
   endpoints:
-    - interval: 30s
+    - port: http
+      interval: 30s
       path: /metrics
 ---
 # fare-consumer (JVM) serves metrics on 8054, on its `http` port.
@@ -94,8 +91,7 @@ spec:
       - key: app.kubernetes.io/name
         operator: In
         values: [fare-consumer]
-  targetPort:
-    name: http
   endpoints:
-    - interval: 30s
+    - port: http
+      interval: 30s
       path: /metrics

@@ -13,5 +13,7 @@ environment:
 dependencies:
 
 dev_dependencies:
-  lints: ^4.0.0
+  # ^3, not ^4: lints 4 requires Dart 3.1, and this package advertises a
+  # 3.0.0 floor that CI actually tests against.
+  lints: ^3.0.0
   test: ^1.24.0

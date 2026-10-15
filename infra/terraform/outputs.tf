@@ -13,7 +13,7 @@ output "get_credentials_command" {
 }
 
 output "database_private_ip" {
-  description = "Cloud SQL private IP. Goes into the atlas-${var.environment}-database-url secret."
+  description = "Cloud SQL private IP. Goes into the environment-suffixed atlas-database-url secret."
   value       = google_sql_database_instance.atlas.private_ip_address
 }
 
@@ -22,7 +22,7 @@ output "database_instance_name" {
 }
 
 output "database_url_template" {
-  description = "DSN shape for the atlas-${var.environment}-database-url secret. The password is deliberately not known to Terraform — substitute it yourself."
+  description = "DSN shape for the environment-suffixed atlas-database-url secret. The password is deliberately not known to Terraform; substitute it yourself."
   value       = "postgres://atlas:<PASSWORD>@${google_sql_database_instance.atlas.private_ip_address}:5432/atlas"
 }
 
